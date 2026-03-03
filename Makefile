@@ -1,0 +1,196 @@
+##############################################################################
+# Build global options
+#
+
+ifeq ($(USE_OPT),)
+  USE_OPT = -O2 -ggdb -fomit-frame-pointer -falign-functions=16
+endif
+
+ifeq ($(USE_COPT),)
+  USE_COPT =
+endif
+
+ifeq ($(USE_CPPOPT),)
+  USE_CPPOPT = -fno-rtti
+endif
+
+ifeq ($(USE_LINK_GC),)
+  USE_LINK_GC = yes
+endif
+
+ifeq ($(USE_LDOPT),)
+  USE_LDOPT =
+endif
+
+ifeq ($(USE_LTO),)
+  USE_LTO = yes
+endif
+
+ifeq ($(USE_VERBOSE_COMPILE),)
+  USE_VERBOSE_COMPILE = no
+endif
+
+ifeq ($(USE_SMART_BUILD),)
+  USE_SMART_BUILD = yes
+endif
+
+#
+# Build global options
+##############################################################################
+
+##############################################################################
+# Architecture or project specific options
+#
+
+ifeq ($(USE_FPU),)
+  USE_FPU = no
+endif
+
+#
+# Architecture or project specific options
+##############################################################################
+
+##############################################################################
+# Project, target, sources and paths
+#
+
+PROJECT = ch
+
+MCU  = cortex-m0plus
+
+# ChibiOS location — default to ./ChibiOS checked out via 'make chibios'.
+CHIBIOS  ?= ./ChibiOS
+CONFDIR  := ./cfg
+BUILDDIR := ./build
+DEPDIR   := ./.dep
+
+PICOTOOL ?= picotool
+CHIBIOS_SVN ?= svn://svn.code.sf.net/p/chibios/code/trunk
+
+# Guard: ChibiOS must exist for build targets.
+ifeq ($(wildcard $(CHIBIOS)/os/license/license.mk),)
+
+# Only filter if not running 'make chibios'.
+ifeq ($(filter chibios,$(MAKECMDGOALS)),)
+$(warning ChibiOS not found at $(CHIBIOS). Run 'make chibios' first or set CHIBIOS=)
+endif
+
+all:
+	@echo "Error: ChibiOS not found at $(CHIBIOS)"
+	@echo "Run 'make chibios' to checkout from SVN, or set CHIBIOS=/path/to/chibios"
+	@exit 1
+
+else
+
+# Licensing files.
+include $(CHIBIOS)/os/license/license.mk
+# Startup files.
+include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_rp2040.mk
+# HAL-OSAL files.
+include $(CHIBIOS)/os/hal/hal.mk
+include $(CHIBIOS)/os/hal/ports/RP/RP2040/platform.mk
+include $(CHIBIOS)/os/hal/boards/RP_PICO_RP2040/board.mk
+include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
+# RTOS files.
+include $(CHIBIOS)/os/rt/rt.mk
+include $(CHIBIOS)/os/common/ports/ARMv6-M/compilers/GCC/mk/port_rp2.mk
+
+LDSCRIPT= $(STARTUPLD)/RP2040_FLASH.ld
+
+CSRC = $(ALLCSRC) \
+       main.c \
+       usbcfg.c \
+       dap.c \
+       swd.c
+
+CPPSRC = $(ALLCPPSRC)
+
+ASMSRC = $(ALLASMSRC)
+
+ASMXSRC = $(ALLXASMSRC)
+
+INCDIR = $(CONFDIR) $(ALLINC)
+
+CWARN = -Wall -Wextra -Wundef -Wstrict-prototypes
+
+CPPWARN = -Wall -Wextra -Wundef
+
+#
+# Project, target, sources and paths
+##############################################################################
+
+##############################################################################
+# User section
+#
+
+UDEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1
+
+UADEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1
+
+UINCDIR =
+
+ULIBDIR =
+
+ULIBS =
+
+#
+# User section
+##############################################################################
+
+##############################################################################
+# Rules
+#
+
+RULESPATH = $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk
+include $(RULESPATH)/arm-none-eabi.mk
+include $(RULESPATH)/rules.mk
+
+#
+# Rules
+##############################################################################
+
+##############################################################################
+# Custom rules — build
+#
+
+$(BUILDDIR)/$(PROJECT).uf2: $(BUILDDIR)/$(PROJECT).elf
+	$(PICOTOOL) uf2 convert $(BUILDDIR)/$(PROJECT).elf $(BUILDDIR)/$(PROJECT).uf2
+
+upload: $(BUILDDIR)/$(PROJECT).uf2
+	$(PICOTOOL) load -v -x $(BUILDDIR)/$(PROJECT).uf2
+
+# End of ChibiOS guard.
+endif
+
+#
+# Custom rules — build
+##############################################################################
+
+##############################################################################
+# ChibiOS checkout (works without ChibiOS present)
+#
+
+.PHONY: chibios
+
+# Checkout/update ChibiOS from SourceForge SVN.
+# Usage:
+#   make chibios                      - checkout trunk
+#   make chibios CHIBIOS_REV=17755    - checkout specific revision
+chibios:
+ifeq ($(wildcard $(CHIBIOS)/.svn),)
+ifdef CHIBIOS_REV
+	svn checkout -r $(CHIBIOS_REV) $(CHIBIOS_SVN) $(CHIBIOS)
+else
+	svn checkout $(CHIBIOS_SVN) $(CHIBIOS)
+endif
+else
+ifdef CHIBIOS_REV
+	svn update -r $(CHIBIOS_REV) $(CHIBIOS)
+else
+	svn update $(CHIBIOS)
+endif
+endif
+
+#
+# ChibiOS checkout
+##############################################################################

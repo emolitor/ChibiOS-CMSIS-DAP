@@ -7,7 +7,7 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 - **CMSIS-DAP v2** over USB bulk endpoints (WinUSB — driverless on Windows)
 - **UART bridge** via USB CDC ACM at 115200 baud
 - **Dual-core SMP**: Core 0 handles USB, Core 1 processes DAP commands
-- **SWD bit-banging** via SIO registers for single-cycle GPIO access
+- **PIO-based SWD** using a hardware state machine for deterministic timing (derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe))
 - **Dual-target support**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
 - **Unique serial number** read from flash chip at boot
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)

@@ -20,7 +20,7 @@
  *
  * Core 0 (ChibiOS RT SMP):
  *   - USB composite device (CMSIS-DAP v2 + CDC ACM)
- *   - DapThread: USB bulk ↔ mailbox/mempool pipeline
+ *   - DapThread: pipelined USB bulk ↔ object FIFO/mailbox pipeline
  *   - UartThread: USB CDC ↔ I/O queue UART bridge
  *   - Main thread: event-driven LED with virtual timer
  *
@@ -61,21 +61,12 @@
 /* UART bridge buffer size. */
 #define UART_BRIDGE_BUF_SIZE    64U
 
-/* Number of DAP packet buffers in memory pool. */
-#define DAP_POOL_SIZE           4U
-
 /* UART I/O queue size. */
 #define UART_QUEUE_SIZE         256U
 
 /*===========================================================================*/
-/* RAMFUNC: Core 1 wait loop.                                                */
+/* Core 1 wait loop (RAMFUNC — runs from RAM).                               */
 /*===========================================================================*/
-
-/*
- * All functions that run with XIP disabled must be in RAM.
- * The .ramtext section is copied from flash to RAM by CRT0 at boot.
- */
-#define RAMFUNC __attribute__((noinline, section(".ramtext")))
 
 /**
  * @brief   Core 1 wait loop — stays in RAM while Core 0 reads flash.
@@ -119,15 +110,13 @@ static event_source_t evt_dap;
 static event_source_t evt_uart;
 
 /*===========================================================================*/
-/* Memory pool and mailboxes for DAP command pipeline.                       */
+/* Object FIFO and mailbox for DAP command pipeline.                         */
 /*===========================================================================*/
 
 static dap_packet_t dap_packets[DAP_POOL_SIZE];
-static memory_pool_t dap_pool;
-
-static msg_t cmd_mbox_buf[DAP_POOL_SIZE];
+static objects_fifo_t cmd_fifo;
+static msg_t cmd_fifo_buf[DAP_POOL_SIZE];
 static msg_t resp_mbox_buf[DAP_POOL_SIZE];
-static mailbox_t cmd_mbox;
 static mailbox_t resp_mbox;
 
 /*===========================================================================*/
@@ -138,13 +127,16 @@ static mailbox_t resp_mbox;
 static dap_data_t dap_state;
 
 /*===========================================================================*/
-/* DAP endpoint USB buffers and synchronization.                             */
+/* DapThread reference and USB receive state.                                */
 /*===========================================================================*/
 
-static uint8_t dap_rx_buf[DAP_PACKET_SIZE];
-static uint8_t dap_tx_buf[DAP_PACKET_SIZE];
-static binary_semaphore_t dap_rx_sem;
+static thread_t *dap_thd;
 static volatile uint32_t dap_rx_len;
+
+/* Thread event masks for DapThread. */
+#define EVT_DAP_RX_DONE         EVENT_MASK(0)
+#define EVT_DAP_TX_DONE         EVENT_MASK(1)
+#define EVT_DAP_RESP_READY      EVENT_MASK(2)
 
 /*===========================================================================*/
 /* DAP USB callbacks (called from USB ISR context).                          */
@@ -153,13 +145,16 @@ static volatile uint32_t dap_rx_len;
 void dap_usb_out_cb(USBDriver *usbp, usbep_t ep) {
   dap_rx_len = usbGetReceiveTransactionSizeX(usbp, ep);
   chSysLockFromISR();
-  chBSemSignalI(&dap_rx_sem);
+  chEvtSignalI(dap_thd, EVT_DAP_RX_DONE);
   chSysUnlockFromISR();
 }
 
 void dap_usb_in_cb(USBDriver *usbp, usbep_t ep) {
   (void)usbp;
   (void)ep;
+  chSysLockFromISR();
+  chEvtSignalI(dap_thd, EVT_DAP_TX_DONE);
+  chSysUnlockFromISR();
 }
 
 /*===========================================================================*/
@@ -196,60 +191,92 @@ static void led_update(void) {
 }
 
 /*===========================================================================*/
-/* DapThread (Core 0) — USB ↔ mailbox bridge.                               */
+/* DapThread (Core 0) — pipelined USB ↔ object FIFO bridge.                 */
 /*===========================================================================*/
 
 static THD_WORKING_AREA(waDapThread, DAP_THREAD_WA_SIZE);
 static THD_FUNCTION(DapThread, arg) {
   (void)arg;
+  dap_packet_t *rx_pkt;
+  dap_packet_t *tx_pkt = NULL;
 
   while (true) {
     /* Wait for USB active. */
     while (USBD1.state != USB_ACTIVE)
       chThdSleepMilliseconds(100);
 
-    /* Arm EP1 OUT to receive a DAP command. */
+    /* Allocate initial RX buffer and arm USB OUT. */
+    rx_pkt = chFifoTakeObjectTimeout(&cmd_fifo, TIME_INFINITE);
     chSysLock();
-    usbStartReceiveI(&USBD1, DAP_EP, dap_rx_buf, DAP_PACKET_SIZE);
+    usbStartReceiveI(&USBD1, DAP_EP, rx_pkt->cmd, DAP_PACKET_SIZE);
     chSysUnlock();
 
-    /* Wait for USB OUT data. */
-    chBSemWait(&dap_rx_sem);
-    if (USBD1.state != USB_ACTIVE) continue;
+    while (USBD1.state == USB_ACTIVE) {
+      eventmask_t events = chEvtWaitAnyTimeout(
+          EVT_DAP_RX_DONE | EVT_DAP_TX_DONE | EVT_DAP_RESP_READY,
+          TIME_MS2I(100));
 
-    /* Handle Transfer Abort locally (must not queue). */
-    if (dap_rx_buf[0] == DAP_CMD_TRANSFER_ABORT) {
-      dap_state.abort = 1U;
-      __DSB();
-      dap_tx_buf[0] = DAP_CMD_TRANSFER_ABORT;
-      dap_tx_buf[1] = DAP_OK;
-      chSysLock();
-      usbStartTransmitI(&USBD1, DAP_EP, dap_tx_buf, 2);
-      chSysUnlock();
-      continue;
+      /* Free completed TX buffer. */
+      if (events & EVT_DAP_TX_DONE) {
+        chFifoReturnObject(&cmd_fifo, tx_pkt);
+        tx_pkt = NULL;
+      }
+
+      /* Process received command. */
+      if (events & EVT_DAP_RX_DONE) {
+        rx_pkt->cmd_len = dap_rx_len;
+
+        if (rx_pkt->cmd[0] == DAP_CMD_TRANSFER_ABORT) {
+          /* Handle abort locally — must not queue to Core 1. */
+          dap_state.abort = 1U;
+          __DSB();
+
+          /* Wait for in-flight TX to complete. */
+          if (tx_pkt != NULL) {
+            chEvtWaitAny(EVT_DAP_TX_DONE);
+            chFifoReturnObject(&cmd_fifo, tx_pkt);
+            tx_pkt = NULL;
+          }
+
+          /* Send abort response directly. */
+          rx_pkt->resp[0] = DAP_CMD_TRANSFER_ABORT;
+          rx_pkt->resp[1] = DAP_OK;
+          chSysLock();
+          usbStartTransmitI(&USBD1, DAP_EP, rx_pkt->resp, 2U);
+          chSysUnlock();
+          tx_pkt = rx_pkt;
+        }
+        else {
+          /* Send command to Core 1 via object FIFO. */
+          chFifoSendObject(&cmd_fifo, rx_pkt);
+        }
+
+        /* Allocate next RX buffer and re-arm USB OUT. */
+        rx_pkt = chFifoTakeObjectTimeout(&cmd_fifo, TIME_INFINITE);
+        chSysLock();
+        usbStartReceiveI(&USBD1, DAP_EP, rx_pkt->cmd, DAP_PACKET_SIZE);
+        chSysUnlock();
+      }
+
+      /* Start TX if idle and response available. */
+      if (tx_pkt == NULL) {
+        msg_t msg;
+        if (chMBFetchTimeout(&resp_mbox, &msg, TIME_IMMEDIATE) == MSG_OK) {
+          dap_packet_t *pkt = (dap_packet_t *)msg;
+          chSysLock();
+          usbStartTransmitI(&USBD1, DAP_EP, pkt->resp, pkt->resp_len);
+          chSysUnlock();
+          tx_pkt = pkt;
+        }
+      }
     }
 
-    /* Allocate packet from pool, fill command, post to mailbox. */
-    dap_packet_t *pkt = chPoolAlloc(&dap_pool);
-    if (pkt == NULL) continue;
-    memcpy(pkt->cmd, dap_rx_buf, dap_rx_len);
-    pkt->cmd_len = dap_rx_len;
-
-    chMBPostTimeout(&cmd_mbox, (msg_t)pkt, TIME_INFINITE);
-
-    /* Wait for response from DapProcessThread. */
-    msg_t msg;
-    chMBFetchTimeout(&resp_mbox, &msg, TIME_INFINITE);
-    pkt = (dap_packet_t *)msg;
-
-    /* Send response via USB. */
-    memcpy(dap_tx_buf, pkt->resp, pkt->resp_len);
-    chSysLock();
-    usbStartTransmitI(&USBD1, DAP_EP, dap_tx_buf, pkt->resp_len);
-    chSysUnlock();
-
-    /* Return packet to pool. */
-    chPoolFree(&dap_pool, pkt);
+    /* USB disconnected — return buffers to pool. */
+    chFifoReturnObject(&cmd_fifo, rx_pkt);
+    if (tx_pkt != NULL) {
+      chFifoReturnObject(&cmd_fifo, tx_pkt);
+      tx_pkt = NULL;
+    }
   }
 }
 
@@ -265,13 +292,16 @@ static THD_FUNCTION(DapProcessThread, arg) {
   dap_state.evt_dap = &evt_dap;
 
   while (true) {
-    msg_t msg;
-    chMBFetchTimeout(&cmd_mbox, &msg, TIME_INFINITE);
-    dap_packet_t *pkt = (dap_packet_t *)msg;
+    void *objp;
+    if (chFifoReceiveObjectTimeout(&cmd_fifo, &objp,
+                                   TIME_INFINITE) != MSG_OK)
+      continue;
+    dap_packet_t *pkt = (dap_packet_t *)objp;
 
     pkt->resp_len = dap_process_command(&dap_state, pkt->cmd, pkt->resp);
 
     chMBPostTimeout(&resp_mbox, (msg_t)pkt, TIME_INFINITE);
+    chEvtSignal(dap_thd, EVT_DAP_RESP_READY);
   }
 }
 
@@ -435,14 +465,16 @@ int main(void) {
   chEvtObjectInit(&evt_dap);
   chEvtObjectInit(&evt_uart);
 
-  /* Memory pool and mailboxes for DAP command pipeline. */
-  chPoolObjectInit(&dap_pool, sizeof(dap_packet_t), NULL);
-  chPoolLoadArray(&dap_pool, dap_packets, DAP_POOL_SIZE);
-  chMBObjectInit(&cmd_mbox, cmd_mbox_buf, DAP_POOL_SIZE);
+  /* Object FIFO for DAP command pipeline.
+   * Initialize components manually because chFifoObjectInit() calls
+   * chGuardedPoolLoadArray() which uses chGuardedPoolFree() — that
+   * acquires the SMP kernel spinlock, which isn't available before
+   * chSysInit(). Use plain chPoolLoadArray() + direct sem init instead. */
+  chPoolObjectInit(&cmd_fifo.free.pool, sizeof(dap_packet_t), NULL);
+  chSemObjectInit(&cmd_fifo.free.sem, (cnt_t)DAP_POOL_SIZE);
+  chPoolLoadArray(&cmd_fifo.free.pool, dap_packets, DAP_POOL_SIZE);
+  chMBObjectInit(&cmd_fifo.mbx, cmd_fifo_buf, DAP_POOL_SIZE);
   chMBObjectInit(&resp_mbox, resp_mbox_buf, DAP_POOL_SIZE);
-
-  /* DAP receive semaphore. */
-  chBSemObjectInit(&dap_rx_sem, true);
 
   /* Virtual timer for LED blink. */
   chVTObjectInit(&led_vt);
@@ -476,8 +508,8 @@ int main(void) {
   palSetLineMode(LED_PIN, PAL_MODE_OUTPUT_PUSHPULL);
 
   /* Start DAP thread (higher priority). */
-  chThdCreateStatic(waDapThread, sizeof(waDapThread),
-                    NORMALPRIO + 1, DapThread, NULL);
+  dap_thd = chThdCreateStatic(waDapThread, sizeof(waDapThread),
+                               NORMALPRIO + 1, DapThread, NULL);
 
   /* Start UART bridge thread. */
   chThdCreateStatic(waUartThread, sizeof(waUartThread),

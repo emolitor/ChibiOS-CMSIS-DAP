@@ -30,7 +30,8 @@
 /*===========================================================================*/
 
 #define DAP_PACKET_SIZE         64U
-#define DAP_PACKET_COUNT        1U
+#define DAP_POOL_SIZE           16U
+#define DAP_PACKET_COUNT        (DAP_POOL_SIZE - 2U)
 
 /*===========================================================================*/
 /* DAP Command IDs (CMSIS-DAP v2 specification).                             */

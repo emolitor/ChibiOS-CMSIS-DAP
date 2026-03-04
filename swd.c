@@ -161,9 +161,9 @@ void swd_off(void) {
  * @param[in]     data_phase    if nonzero, clock data phase on WAIT/FAULT
  * @return        ACK value
  */
-uint8_t swd_transfer(uint32_t request, uint32_t *data,
-                      uint32_t clk_div, uint32_t idle_cycles,
-                      uint32_t turnaround, uint32_t data_phase) {
+RAMFUNC uint8_t swd_transfer(uint32_t request, uint32_t *data,
+                              uint32_t clk_div, uint32_t idle_cycles,
+                              uint32_t turnaround, uint32_t data_phase) {
   uint32_t ack;
   uint32_t val;
   uint32_t parity;
@@ -240,7 +240,7 @@ uint8_t swd_transfer(uint32_t request, uint32_t *data,
  * @param[in] data      bit data (LSB first, packed bytes)
  * @param[in] clk_div   PIO clock divider (unused, set at init)
  */
-void swj_sequence(uint32_t count, const uint8_t *data, uint32_t clk_div) {
+RAMFUNC void swj_sequence(uint32_t count, const uint8_t *data, uint32_t clk_div) {
   uint32_t remaining = count;
 
   (void)clk_div;
@@ -273,8 +273,8 @@ void swj_sequence(uint32_t count, const uint8_t *data, uint32_t clk_div) {
  * @param[out] swdi       input data (when direction=1)
  * @param[in]  clk_div    PIO clock divider (unused, set at init)
  */
-void swd_sequence(uint32_t info, const uint8_t *swdo, uint8_t *swdi,
-                   uint32_t clk_div) {
+RAMFUNC void swd_sequence(uint32_t info, const uint8_t *swdo, uint8_t *swdi,
+                           uint32_t clk_div) {
   uint32_t count = info & 0x3FU;
   uint32_t remaining;
   uint32_t offset = 0U;

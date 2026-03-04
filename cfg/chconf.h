@@ -79,7 +79,7 @@
 #define CH_CFG_MEMCORE_SIZE                 0
 #define CH_CFG_USE_HEAP                     FALSE
 #define CH_CFG_USE_MEMPOOLS                 TRUE
-#define CH_CFG_USE_OBJ_FIFOS                FALSE
+#define CH_CFG_USE_OBJ_FIFOS                TRUE
 #define CH_CFG_USE_PIPES                    FALSE
 #define CH_CFG_USE_OBJ_CACHES              FALSE
 #define CH_CFG_USE_DELEGATES                FALSE

@@ -52,7 +52,7 @@ static const uint8_t device_descriptor_data[] = {
     0x40,            /* bMaxPacketSize (64) */
     0x2E8A,          /* idVendor (Raspberry Pi) */
     0x000C,          /* idProduct (Debug Probe) */
-    0x0100,          /* bcdDevice */
+    0x0220,          /* bcdDevice (>= 2.2.0 disables OpenOCD quirk_mode) */
     1,               /* iManufacturer */
     2,               /* iProduct */
     3,               /* iSerialNumber */

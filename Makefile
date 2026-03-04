@@ -210,6 +210,21 @@ endif
 endif
 
 ##############################################################################
+# PIO assembly (requires pioasm in PATH)
+#
+
+# Regenerate PIO header from assembly source.
+# The generated header is checked in; this target is only needed when
+# modifying probe_swd.pio.
+.PHONY: pioasm
+pioasm: probe_swd.pio
+	pioasm $< probe_swd.pio.h
+
+#
+# PIO assembly
+##############################################################################
+
+##############################################################################
 # ChibiOS checkout (works without ChibiOS present)
 #
 

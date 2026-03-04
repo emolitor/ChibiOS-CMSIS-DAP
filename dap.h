@@ -163,7 +163,7 @@ typedef struct {
 
 typedef struct {
   uint8_t   debug_port;         /* 0=disconnected, 1=SWD, 2=JTAG */
-  uint32_t  clock_delay;        /* delay count for SWD clock */
+  uint32_t  clk_div;            /* PIO clock divider (16.8 fixed-point) */
   uint32_t  clock_freq;         /* requested clock frequency in Hz */
 
   /* Transfer configuration. */

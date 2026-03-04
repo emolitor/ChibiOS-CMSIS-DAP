@@ -181,7 +181,7 @@ static uint32_t dap_connect(dap_data_t *dap, const uint8_t *req,
   resp[0] = DAP_CMD_CONNECT;
 
   if (port == DAP_PORT_DEFAULT || port == DAP_PORT_SWD) {
-    swd_init(dap->clock_delay);
+    swd_init(dap->clk_div);
     dap->debug_port = DAP_PORT_SWD;
     resp[1] = DAP_PORT_SWD;
   }
@@ -273,7 +273,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
         /* Read with match — flush any pending posted read first. */
         if (post_read) {
           for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(rdbuff_req, &data, dap->clock_delay,
+            ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
             if (ack != SWD_ACK_WAIT)
@@ -296,7 +296,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
         if (request & DAP_TRANSFER_APnDP) {
           /* AP read: issue dummy read to prime pipeline. */
           for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(swd_req, NULL, dap->clock_delay,
+            ack = swd_transfer(swd_req, NULL, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
             if (ack != SWD_ACK_WAIT)
@@ -317,7 +317,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             read_req = swd_req;
 
           for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(read_req, &data, dap->clock_delay,
+            ack = swd_transfer(read_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
             if (ack != SWD_ACK_WAIT)
@@ -350,7 +350,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
           if ((request & DAP_TRANSFER_APnDP) && !(request & DAP_TRANSFER_MATCH_VALUE)) {
             /* Next is also an AP read — pipeline: this read returns prev data. */
             for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(swd_req, &data, dap->clock_delay,
+              ack = swd_transfer(swd_req, &data, dap->clk_div,
                                  dap->idle_cycles, dap->turnaround,
                                  dap->data_phase);
               if (ack != SWD_ACK_WAIT)
@@ -360,7 +360,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
           else {
             /* Not an AP read — flush via RDBUFF. */
             for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(rdbuff_req, &data, dap->clock_delay,
+              ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                                  dap->idle_cycles, dap->turnaround,
                                  dap->data_phase);
               if (ack != SWD_ACK_WAIT)
@@ -386,7 +386,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
           if (!(request & DAP_TRANSFER_APnDP)) {
             /* DP read: issue and store directly. */
             for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(swd_req, &data, dap->clock_delay,
+              ack = swd_transfer(swd_req, &data, dap->clk_div,
                                  dap->idle_cycles, dap->turnaround,
                                  dap->data_phase);
               if (ack != SWD_ACK_WAIT)
@@ -412,7 +412,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
         else {
           /* No pending posted read. */
           for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(swd_req, &data, dap->clock_delay,
+            ack = swd_transfer(swd_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
             if (ack != SWD_ACK_WAIT)
@@ -447,7 +447,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       /* Flush pending posted read before write. */
       if (post_read) {
         for (retry = 0; retry <= dap->retry_count; retry++) {
-          ack = swd_transfer(rdbuff_req, &data, dap->clock_delay,
+          ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                              dap->idle_cycles, dap->turnaround,
                              dap->data_phase);
           if (ack != SWD_ACK_WAIT)
@@ -475,7 +475,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       req_idx += 4U;
 
       for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(swd_req, &data, dap->clock_delay,
+        ack = swd_transfer(swd_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
         if (ack != SWD_ACK_WAIT)
@@ -496,7 +496,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
   /* Flush any pending posted AP read at end of sequence. */
   if (post_read) {
     for (retry = 0; retry <= dap->retry_count; retry++) {
-      ack = swd_transfer(rdbuff_req, &data, dap->clock_delay,
+      ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                          dap->idle_cycles, dap->turnaround,
                          dap->data_phase);
       if (ack != SWD_ACK_WAIT)
@@ -515,7 +515,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
   else if (check_write) {
     /* Verify last write didn't cause a fault. */
     for (retry = 0; retry <= dap->retry_count; retry++) {
-      ack = swd_transfer(rdbuff_req, NULL, dap->clock_delay,
+      ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
                          dap->idle_cycles, dap->turnaround,
                          dap->data_phase);
       if (ack != SWD_ACK_WAIT)
@@ -558,7 +558,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
     if (request & DAP_TRANSFER_APnDP) {
       /* AP read: issue dummy read first to prime pipeline. */
       for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(swd_req, NULL, dap->clock_delay,
+        ack = swd_transfer(swd_req, NULL, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
         if (ack != SWD_ACK_WAIT)
@@ -581,7 +581,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
         read_req = swd_req;
 
       for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(read_req, &data, dap->clock_delay,
+        ack = swd_transfer(read_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
         if (ack != SWD_ACK_WAIT)
@@ -612,7 +612,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
       req_idx += 4U;
 
       for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(swd_req, &data, dap->clock_delay,
+        ack = swd_transfer(swd_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
         if (ack != SWD_ACK_WAIT)
@@ -627,7 +627,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
     if (ack == SWD_ACK_OK) {
       uint8_t rdbuff_req = swd_request_byte(DAP_TRANSFER_RnW | (0x03U << 2));
       for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(rdbuff_req, NULL, dap->clock_delay,
+        ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
         if (ack != SWD_ACK_WAIT)
@@ -665,7 +665,7 @@ static uint32_t dap_write_abort(dap_data_t *dap, const uint8_t *req,
   swd_req = swd_request_byte(0U);  /* DP, Write, A[3:2]=0 → ABORT reg */
 
   for (retry = 0; retry <= dap->retry_count; retry++) {
-    ack = swd_transfer(swd_req, &data, dap->clock_delay,
+    ack = swd_transfer(swd_req, &data, dap->clk_div,
                        dap->idle_cycles, dap->turnaround,
                        dap->data_phase);
     if (ack != SWD_ACK_WAIT)
@@ -753,18 +753,16 @@ static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
 
   dap->clock_freq = clock;
 
-  /* Calculate delay count.
-   * Each delay loop iteration is ~4 cycles.
-   * Period = 2 * delay * 4 / CLK_SYS => delay = CLK_SYS / (8 * clock).
-   * Minimum delay = 0 (maximum speed). */
-  if (clock >= (RP_CLK_SYS_FREQ / 8U)) {
-    dap->clock_delay = 0U;
-  }
-  else {
-    dap->clock_delay = (RP_CLK_SYS_FREQ / (8U * clock));
-    if (dap->clock_delay > 0U)
-      dap->clock_delay--;
-  }
+  /* Calculate PIO clock divider as 16.8 fixed-point.
+   * PIO SM runs at sys_clk / clkdiv, each SWCLK period = 4 PIO cycles.
+   * clkdiv = sys_clk / (4 * target_freq).
+   * Minimum clkdiv = 1.0 (encoded as 0x100). */
+  uint32_t clkdiv_256 = (uint32_t)((uint64_t)RP_CLK_SYS_FREQ * 64U / clock);
+  if (clkdiv_256 < 0x100U)
+    clkdiv_256 = 0x100U;  /* Minimum 1.0 */
+  dap->clk_div = clkdiv_256;
+  if (dap->debug_port == DAP_PORT_SWD)
+    swd_set_clkdiv(clkdiv_256);
 
   resp[1] = DAP_OK;
   return 2U;
@@ -782,7 +780,7 @@ static uint32_t dap_swj_sequence(dap_data_t *dap, const uint8_t *req,
 
   resp[0] = DAP_CMD_SWJ_SEQUENCE;
 
-  swj_sequence(count, &req[2], dap->clock_delay);
+  swj_sequence(count, &req[2], dap->clk_div);
 
   resp[1] = DAP_OK;
   return 2U;
@@ -827,12 +825,12 @@ static uint32_t dap_swd_sequence(dap_data_t *dap, const uint8_t *req,
 
     if (info & 0x80U) {
       /* Input: capture bits to response. */
-      swd_sequence(info, NULL, &resp[resp_idx], dap->clock_delay);
+      swd_sequence(info, NULL, &resp[resp_idx], dap->clk_div);
       resp_idx += bytes;
     }
     else {
       /* Output: send bits from request. */
-      swd_sequence(info, &req[req_idx], NULL, dap->clock_delay);
+      swd_sequence(info, &req[req_idx], NULL, dap->clk_div);
       req_idx += bytes;
     }
   }
@@ -870,8 +868,9 @@ static uint32_t dap_reset_target(uint8_t *resp) {
 
 void dap_init(dap_data_t *dap) {
   memset(dap, 0, sizeof(dap_data_t));
-  dap->clock_delay  = 0U;     /* Maximum speed */
-  dap->clock_freq   = 1000000U; /* Default 1 MHz */
+  /* Default 1 MHz: clkdiv = sys_clk / (4 * 1e6) as 16.8 fixed-point. */
+  dap->clock_freq   = 1000000U;
+  dap->clk_div      = (uint32_t)((uint64_t)RP_CLK_SYS_FREQ * 64U / 1000000U);
   dap->idle_cycles  = 0U;
   dap->retry_count  = 100U;
   dap->match_retry  = 0U;

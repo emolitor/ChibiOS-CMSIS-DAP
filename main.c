@@ -26,7 +26,7 @@
  *
  * Core 1 (ChibiOS RT SMP):
  *   - DapProcessThread: DAP command processing
- *   - SWD bit-banging via SIO registers
+ *   - SWD via PIO state machine (deterministic timing)
  *
  * Pin layout (matching Pico Debug Probe):
  *   GPIO 1: nRESET (open-drain)

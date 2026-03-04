@@ -16,26 +16,21 @@
  */
 
 /*
- * SWD bit-banging driver for RP2040 CMSIS-DAP probe.
+ * SWD bit-banging driver for CMSIS-DAP probe.
  *
- * All GPIO access uses the SIO block (0xD0000000) for single-cycle I/O.
- * Pad configuration uses PADS_BANK0 and IO_BANK0 registers directly.
- * This code runs on Core 1 (bare-metal, no ChibiOS).
+ * All GPIO access uses the SIO block for single-cycle I/O.
+ * Pad configuration uses PADS_BANK0 and IO_BANK0 CMSIS structs.
+ * This code runs on Core 1.
  */
 
 #include "swd.h"
 
 /*===========================================================================*/
-/* Pad configuration registers.                                              */
+/* Pad configuration registers (CMSIS struct access).                        */
 /*===========================================================================*/
 
-#define PADS_BANK0_BASE         0x4001C000U
-#define IO_BANK0_BASE           0x40014000U
-
-/* Pad register: offset = 4 + gpio*4 */
-#define PAD_REG(gpio)           (*(volatile uint32_t *)(PADS_BANK0_BASE + 4U + (gpio) * 4U))
-/* IO control register: offset = gpio*8 + 4 */
-#define IO_CTRL(gpio)           (*(volatile uint32_t *)(IO_BANK0_BASE + (gpio) * 8U + 4U))
+#define PAD_REG(gpio)           (PADS_BANK0->GPIO[(gpio)])
+#define IO_CTRL(gpio)           (IO_BANK0->GPIO[(gpio)].CTRL)
 
 /* Pad bits. */
 #define PAD_OD                  (1U << 7)   /* Output disable */

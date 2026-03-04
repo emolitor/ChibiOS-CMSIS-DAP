@@ -16,14 +16,14 @@
  */
 
 /*
- * SWD bit-banging driver for RP2040 CMSIS-DAP probe.
+ * SWD bit-banging driver for CMSIS-DAP probe.
  * Runs on Core 1 using direct SIO register access.
  */
 
 #ifndef SWD_H
 #define SWD_H
 
-#include <stdint.h>
+#include "hal.h"
 
 /*===========================================================================*/
 /* Pin definitions (matching Pico Debug Probe layout).                       */
@@ -34,15 +34,14 @@
 #define SWD_PIN_SWDIO           3U
 
 /*===========================================================================*/
-/* SIO register addresses for single-cycle GPIO access.                      */
+/* SIO register access for single-cycle GPIO (CMSIS struct).                 */
 /*===========================================================================*/
 
-#define SIO_BASE                0xD0000000U
-#define SIO_GPIO_IN             (*(volatile uint32_t *)(SIO_BASE + 0x004U))
-#define SIO_GPIO_OUT_SET        (*(volatile uint32_t *)(SIO_BASE + 0x014U))
-#define SIO_GPIO_OUT_CLR        (*(volatile uint32_t *)(SIO_BASE + 0x018U))
-#define SIO_GPIO_OE_SET         (*(volatile uint32_t *)(SIO_BASE + 0x024U))
-#define SIO_GPIO_OE_CLR         (*(volatile uint32_t *)(SIO_BASE + 0x028U))
+#define SIO_GPIO_IN             (SIO->GPIO_IN)
+#define SIO_GPIO_OUT_SET        (SIO->GPIO_OUT_SET)
+#define SIO_GPIO_OUT_CLR        (SIO->GPIO_OUT_CLR)
+#define SIO_GPIO_OE_SET         (SIO->GPIO_OE_SET)
+#define SIO_GPIO_OE_CLR         (SIO->GPIO_OE_CLR)
 
 #define SWCLK_BIT               (1U << SWD_PIN_SWCLK)
 #define SWDIO_BIT               (1U << SWD_PIN_SWDIO)

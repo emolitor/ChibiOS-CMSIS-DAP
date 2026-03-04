@@ -16,7 +16,7 @@
  */
 
 /*
- * CMSIS-DAP v2 protocol handler for RP2040 debug probe.
+ * CMSIS-DAP v2 protocol handler for debug probe.
  *
  * Implements the command dispatcher and all required DAP commands.
  * Runs on Core 1 as a ChibiOS SMP thread.
@@ -24,6 +24,7 @@
 
 #include <string.h>
 #include "ch.h"
+#include "hal.h"
 #include "dap.h"
 #include "swd.h"
 
@@ -753,14 +754,14 @@ static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
   dap->clock_freq = clock;
 
   /* Calculate delay count.
-   * At ~125MHz CPU, each delay loop iteration is ~4 cycles.
-   * Period = 2 * delay * 4 / 125MHz => delay = 125MHz / (8 * clock).
+   * Each delay loop iteration is ~4 cycles.
+   * Period = 2 * delay * 4 / CLK_SYS => delay = CLK_SYS / (8 * clock).
    * Minimum delay = 0 (maximum speed). */
-  if (clock >= 16000000U) {
+  if (clock >= (RP_CLK_SYS_FREQ / 8U)) {
     dap->clock_delay = 0U;
   }
   else {
-    dap->clock_delay = (125000000U / (8U * clock));
+    dap->clock_delay = (RP_CLK_SYS_FREQ / (8U * clock));
     if (dap->clock_delay > 0U)
       dap->clock_delay--;
   }

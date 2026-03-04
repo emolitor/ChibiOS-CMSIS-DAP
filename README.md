@@ -1,13 +1,14 @@
 # ChibiOS Probe (CMSIS-DAP)
 
-A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico), built on ChibiOS RTOS with dual-core SMP. Implements a USB composite device with a DAP debugger and UART bridge, compatible with the [Raspberry Pi Debug Probe](https://www.raspberrypi.com/products/debug-probe/) pinout.
+A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspberry Pi Pico 2), built on ChibiOS RTOS with dual-core SMP. Implements a USB composite device with a DAP debugger and UART bridge, compatible with the [Raspberry Pi Debug Probe](https://www.raspberrypi.com/products/debug-probe/) pinout.
 
 ## Features
 
 - **CMSIS-DAP v2** over USB bulk endpoints (WinUSB — driverless on Windows)
 - **UART bridge** via USB CDC ACM at 115200 baud
 - **Dual-core SMP**: Core 0 handles USB, Core 1 processes DAP commands
-- **SWD bit-banging** via RP2040 SIO registers for single-cycle GPIO access
+- **SWD bit-banging** via SIO registers for single-cycle GPIO access
+- **Dual-target support**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
 - **Unique serial number** read from flash chip at boot
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)
 
@@ -45,14 +46,14 @@ Includes a BOS descriptor with MS OS 2.0 Platform Capability for automatic WinUS
 
 ```bash
 make chibios                  # check out ChibiOS from SVN (first time only)
-make                          # build (produces build/ch.elf)
+make                          # build both targets (produces build/rp2040/ch.elf and build/rp2350/ch.elf)
 ```
 
 ### Flash
 
 1. Hold BOOTSEL on the Pico and plug it in (or replug) — it mounts as a USB mass storage drive (e.g., `RPI-RP2`)
-2. Build the UF2: `make ch.uf2`
-3. Copy `build/ch.uf2` to the drive — the Pico reboots automatically
+2. Build the UF2: `make`
+3. Copy `build/rp2040/ch.uf2` or `build/rp2350/ch.uf2` to the drive — the Pico reboots automatically
 
 ## License
 

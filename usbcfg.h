@@ -1,4 +1,21 @@
 /*
+ * Copyright (C) 2026 Eric Molitor <github.com/emolitor>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
  * USB composite device configuration for CMSIS-DAP probe.
  *
  * Two USB functions:
@@ -24,8 +41,19 @@
 #define MS_OS_20_VENDOR_CODE    0x01U
 
 /*===========================================================================*/
+/* USB event flags (broadcast via evt_usb).                                  */
+/*===========================================================================*/
+
+#define EVT_USB_CONFIGURED              (1U << 0)
+#define EVT_USB_RESET                   (1U << 1)
+#define EVT_USB_SUSPENDED               (1U << 2)
+#define EVT_USB_WAKEUP                  (1U << 3)
+
+/*===========================================================================*/
 /* Extern declarations.                                                      */
 /*===========================================================================*/
+
+extern event_source_t evt_usb;
 
 extern const USBConfig usbcfg;
 extern const SerialUSBConfig serusbcfg;

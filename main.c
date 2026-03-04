@@ -1,16 +1,32 @@
 /*
- * CMSIS-DAP v2 Debug Probe — RP2040 Dual-Core Implementation
+ * Copyright (C) 2026 Eric Molitor <github.com/emolitor>
  *
- * Core 0 (ChibiOS RT):
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
+ * CMSIS-DAP v2 Debug Probe — RP2040 Dual-Core SMP Implementation
+ *
+ * Core 0 (ChibiOS RT SMP):
  *   - USB composite device (CMSIS-DAP v2 + CDC ACM)
- *   - DAP thread: USB bulk ↔ shared memory ↔ Core 1
- *   - UART bridge thread: SDU1 (USB CDC) ↔ SIOD1 (UART1)
- *   - LED status thread
+ *   - DapThread: USB bulk ↔ mailbox/mempool pipeline
+ *   - UartThread: USB CDC ↔ I/O queue UART bridge
+ *   - Main thread: event-driven LED with virtual timer
  *
- * Core 1 (bare-metal):
- *   - DAP command processor (dap_process_command)
+ * Core 1 (ChibiOS RT SMP):
+ *   - DapProcessThread: DAP command processing
  *   - SWD bit-banging via SIO registers
- *   - Sleeps via WFE when idle
  *
  * Pin layout (matching Pico Debug Probe):
  *   GPIO 1: nRESET (open-drain)
@@ -39,13 +55,20 @@
 #define UART_RX_PIN             5U
 
 #define DAP_THREAD_WA_SIZE      512U
+#define DAP_PROC_THREAD_WA_SIZE 512U
 #define UART_THREAD_WA_SIZE     512U
 
 /* UART bridge buffer size. */
 #define UART_BRIDGE_BUF_SIZE    64U
 
+/* Number of DAP packet buffers in memory pool. */
+#define DAP_POOL_SIZE           4U
+
+/* UART I/O queue size. */
+#define UART_QUEUE_SIZE         256U
+
 /*===========================================================================*/
-/* RAMFUNC: Flash unique ID reading via SSI.                                 */
+/* RAMFUNC: Core 1 wait loop.                                                */
 /*===========================================================================*/
 
 /*
@@ -53,209 +76,6 @@
  * The .ramtext section is copied from flash to RAM by CRT0 at boot.
  */
 #define RAMFUNC __attribute__((noinline, section(".ramtext")))
-
-/* SSI register offsets. */
-#define SSI_BASE                0x18000000U
-#define SSI_CTRLR0_OFF          0x00U
-#define SSI_CTRLR1_OFF          0x04U
-#define SSI_SSIENR_OFF          0x08U
-#define SSI_SER_OFF             0x10U
-#define SSI_BAUDR_OFF           0x14U
-#define SSI_RXFLR_OFF           0x24U
-#define SSI_SR_OFF              0x28U
-#define SSI_DR0_OFF             0x60U
-#define SSI_SPI_CTRLR0_OFF      0xF4U
-
-#define SSI_SR_BUSY             (1U << 0)
-#define SSI_CTRLR0_DFS_8BIT     (7U << 16)
-#define SSI_BAUDR_DEFAULT       6U
-#define SSI_CTRLR0_XIP          0x001F0300U
-#define SSI_SPI_CTRLR0_XIP      0x03000218U
-
-/* IO QSPI registers. */
-#define IOQSPI_BASE             0x40018000U
-#define IOQSPI_SS_CTRL_OFF      0x0CU
-
-/* PADS QSPI registers. */
-#define PADS_QSPI_BASE          0x40020000U
-#define PADS_QSPI_SD0_OFF       0x08U
-#define PADS_QSPI_SD1_OFF       0x0CU
-#define PADS_QSPI_SD2_OFF       0x10U
-#define PADS_QSPI_SD3_OFF       0x14U
-#define PADS_OD                 (1U << 7)
-#define PADS_IE                 (1U << 6)
-#define PADS_PUE                (1U << 3)
-#define PADS_PDE                (1U << 2)
-
-/* XIP controller. */
-#define XIP_CTRL_BASE           0x14000000U
-#define XIP_CTRL_OFF            0x00U
-#define XIP_FLUSH_OFF           0x04U
-
-#define FLASHCMD_UNIQUE_ID      0x4BU
-
-/**
- * @brief   Force QSPI chip select high or low.
- * @note    RAMFUNC — runs from RAM.
- */
-RAMFUNC static void flash_cs_force(bool high) {
-  volatile uint32_t *ss_ctrl =
-      (volatile uint32_t *)(IOQSPI_BASE + IOQSPI_SS_CTRL_OFF);
-  uint32_t val = high ? 3U : 2U;  /* OUTOVER_HIGH=3, OUTOVER_LOW=2 */
-
-  *ss_ctrl = (*ss_ctrl & ~(3U << 8)) | (val << 8);
-  (void)*ss_ctrl;  /* Read-back to flush write. */
-}
-
-/**
- * @brief   Exit XIP mode and configure SSI for direct SPI access.
- * @note    RAMFUNC — runs from RAM. Pattern from ChibiOS EFL driver.
- */
-RAMFUNC static void flash_exit_xip(volatile uint32_t *ssi) {
-  volatile uint32_t *pads = (volatile uint32_t *)PADS_QSPI_BASE;
-  uint32_t pad_save, pad_tmp;
-  unsigned i;
-  volatile unsigned delay;
-
-  /* Wait for SSI idle. */
-  while ((ssi[SSI_SR_OFF / 4U] & SSI_SR_BUSY) != 0U) {
-  }
-
-  /* Configure SSI for standard 8-bit SPI. */
-  ssi[SSI_SSIENR_OFF / 4U] = 0U;
-  ssi[SSI_BAUDR_OFF / 4U]  = SSI_BAUDR_DEFAULT;
-  ssi[SSI_CTRLR0_OFF / 4U] = SSI_CTRLR0_DFS_8BIT;
-  ssi[SSI_SER_OFF / 4U]    = 1U;
-  ssi[SSI_SSIENR_OFF / 4U] = 1U;
-
-  /* Save pad state, set output-disabled with pull-down. */
-  pad_save = pads[PADS_QSPI_SD0_OFF / 4U];
-  pad_tmp  = (pad_save & ~(PADS_OD | PADS_PUE | PADS_PDE))
-             | PADS_OD | PADS_PDE;
-
-  /* Step 1: CS high, 32 clocks with IO pulled down. */
-  flash_cs_force(true);
-  pads[PADS_QSPI_SD0_OFF / 4U] = pad_tmp;
-  pads[PADS_QSPI_SD1_OFF / 4U] = pad_tmp;
-  pads[PADS_QSPI_SD2_OFF / 4U] = pad_tmp;
-  pads[PADS_QSPI_SD3_OFF / 4U] = pad_tmp;
-
-  for (delay = 0U; delay < 2048U; delay++) {
-  }
-
-  for (i = 0U; i < 4U; i++) {
-    ssi[SSI_DR0_OFF / 4U] = 0U;
-    while (ssi[SSI_RXFLR_OFF / 4U] == 0U) {
-    }
-    (void)ssi[SSI_DR0_OFF / 4U];
-  }
-
-  /* Step 2: CS low, 32 clocks with IO pulled up. */
-  pad_tmp = (pad_tmp & ~PADS_PDE) | PADS_PUE;
-  flash_cs_force(false);
-  pads[PADS_QSPI_SD0_OFF / 4U] = pad_tmp;
-  pads[PADS_QSPI_SD1_OFF / 4U] = pad_tmp;
-  pads[PADS_QSPI_SD2_OFF / 4U] = pad_tmp;
-  pads[PADS_QSPI_SD3_OFF / 4U] = pad_tmp;
-
-  for (delay = 0U; delay < 2048U; delay++) {
-  }
-
-  for (i = 0U; i < 4U; i++) {
-    ssi[SSI_DR0_OFF / 4U] = 0U;
-    while (ssi[SSI_RXFLR_OFF / 4U] == 0U) {
-    }
-    (void)ssi[SSI_DR0_OFF / 4U];
-  }
-
-  /* Restore pad controls. */
-  pads[PADS_QSPI_SD0_OFF / 4U] = pad_save;
-  pads[PADS_QSPI_SD1_OFF / 4U] = pad_save;
-  pad_save = (pad_save & ~PADS_PDE) | PADS_PUE;
-  pads[PADS_QSPI_SD2_OFF / 4U] = pad_save;
-  pads[PADS_QSPI_SD3_OFF / 4U] = pad_save;
-
-  /* Step 3: Send 0xFF 0xFF to exit continuous read mode. */
-  flash_cs_force(false);
-  ssi[SSI_DR0_OFF / 4U] = 0xFFU;
-  ssi[SSI_DR0_OFF / 4U] = 0xFFU;
-  while (ssi[SSI_RXFLR_OFF / 4U] < 2U) {
-  }
-  (void)ssi[SSI_DR0_OFF / 4U];
-  (void)ssi[SSI_DR0_OFF / 4U];
-  flash_cs_force(true);
-}
-
-/**
- * @brief   Re-enter XIP mode and flush cache.
- * @note    RAMFUNC — runs from RAM.
- */
-RAMFUNC static void flash_enter_xip(volatile uint32_t *ssi) {
-  volatile uint32_t *ss_ctrl =
-      (volatile uint32_t *)(IOQSPI_BASE + IOQSPI_SS_CTRL_OFF);
-  volatile uint32_t *xip = (volatile uint32_t *)XIP_CTRL_BASE;
-
-  /* Reset CS to normal operation. */
-  *ss_ctrl = 0U;
-
-  /* Configure SSI for XIP. */
-  ssi[SSI_SSIENR_OFF / 4U]     = 0U;
-  ssi[SSI_BAUDR_OFF / 4U]      = SSI_BAUDR_DEFAULT;
-  ssi[SSI_CTRLR0_OFF / 4U]     = SSI_CTRLR0_XIP;
-  ssi[SSI_CTRLR1_OFF / 4U]     = 0U;
-  ssi[SSI_SPI_CTRLR0_OFF / 4U] = SSI_SPI_CTRLR0_XIP;
-  ssi[SSI_SER_OFF / 4U]        = 1U;
-  ssi[SSI_SSIENR_OFF / 4U]     = 1U;
-
-  /* Flush and enable XIP cache. */
-  xip[XIP_FLUSH_OFF / 4U] = 1U;
-  __DSB();
-  __ISB();
-  xip[XIP_CTRL_OFF / 4U] = 1U;
-}
-
-/**
- * @brief   Read the flash chip's 8-byte unique ID via JEDEC 0x4B command.
- * @note    RAMFUNC — runs from RAM. Exits and re-enters XIP.
- *
- * @param[out] uid  8-byte buffer for the unique ID.
- */
-RAMFUNC static void read_flash_unique_id(uint8_t *uid) {
-  volatile uint32_t *ssi = (volatile uint32_t *)SSI_BASE;
-  unsigned i;
-
-  flash_exit_xip(ssi);
-
-  /* Assert CS. */
-  flash_cs_force(false);
-
-  /* Send command byte 0x4B. */
-  ssi[SSI_DR0_OFF / 4U] = FLASHCMD_UNIQUE_ID;
-  while (ssi[SSI_RXFLR_OFF / 4U] == 0U) {
-  }
-  (void)ssi[SSI_DR0_OFF / 4U];
-
-  /* Send 4 dummy bytes. */
-  for (i = 0U; i < 4U; i++) {
-    ssi[SSI_DR0_OFF / 4U] = 0U;
-    while (ssi[SSI_RXFLR_OFF / 4U] == 0U) {
-    }
-    (void)ssi[SSI_DR0_OFF / 4U];
-  }
-
-  /* Read 8 bytes of unique ID. */
-  for (i = 0U; i < 8U; i++) {
-    ssi[SSI_DR0_OFF / 4U] = 0U;
-    while (ssi[SSI_RXFLR_OFF / 4U] == 0U) {
-    }
-    uid[i] = (uint8_t)ssi[SSI_DR0_OFF / 4U];
-  }
-
-  /* Deassert CS. */
-  flash_cs_force(true);
-
-  flash_enter_xip(ssi);
-}
 
 /**
  * @brief   Core 1 wait loop — stays in RAM while Core 0 reads flash.
@@ -284,14 +104,38 @@ static void uid_to_hex(const uint8_t *uid, char *hex, uint32_t len) {
 }
 
 /*===========================================================================*/
-/* Shared memory for inter-core communication.                               */
+/* Boot handshake flags for flash ID reading.                                */
 /*===========================================================================*/
 
-static dap_shared_t dap_shared __attribute__((aligned(4)));
-
-/* Handshake flags for boot-time flash ID reading. */
 static volatile uint32_t c1_in_ram    = 0U;
 static volatile uint32_t init_complete = 0U;
+
+/*===========================================================================*/
+/* Event sources.                                                            */
+/*===========================================================================*/
+
+event_source_t evt_usb;
+static event_source_t evt_dap;
+static event_source_t evt_uart;
+
+/*===========================================================================*/
+/* Memory pool and mailboxes for DAP command pipeline.                       */
+/*===========================================================================*/
+
+static dap_packet_t dap_packets[DAP_POOL_SIZE];
+static memory_pool_t dap_pool;
+
+static msg_t cmd_mbox_buf[DAP_POOL_SIZE];
+static msg_t resp_mbox_buf[DAP_POOL_SIZE];
+static mailbox_t cmd_mbox;
+static mailbox_t resp_mbox;
+
+/*===========================================================================*/
+/* DAP state (accessed by DapThread on Core 0 and DapProcessThread on        */
+/* Core 1 — only abort flag is cross-core, single-byte relaxed access).      */
+/*===========================================================================*/
+
+static dap_data_t dap_state;
 
 /*===========================================================================*/
 /* DAP endpoint USB buffers and synchronization.                             */
@@ -307,7 +151,6 @@ static volatile uint32_t dap_rx_len;
 /*===========================================================================*/
 
 void dap_usb_out_cb(USBDriver *usbp, usbep_t ep) {
-  /* Data received on EP1 OUT. */
   dap_rx_len = usbGetReceiveTransactionSizeX(usbp, ep);
   chSysLockFromISR();
   chBSemSignalI(&dap_rx_sem);
@@ -315,106 +158,170 @@ void dap_usb_out_cb(USBDriver *usbp, usbep_t ep) {
 }
 
 void dap_usb_in_cb(USBDriver *usbp, usbep_t ep) {
-  /* IN transfer complete — nothing to do. */
   (void)usbp;
   (void)ep;
 }
 
 /*===========================================================================*/
-/* DAP Thread (Core 0) — bridges USB ↔ Core 1.                              */
+/* Virtual timer and LED state tracking.                                     */
+/*===========================================================================*/
+
+static virtual_timer_t led_vt;
+static bool usb_active;
+static bool dap_connected;
+static bool dap_running;
+
+/**
+ * @brief   Virtual timer callback — toggles LED (ISR context).
+ */
+static void led_timer_cb(virtual_timer_t *vtp, void *p) {
+  (void)vtp; (void)p;
+  palToggleLine(LED_PIN);
+}
+
+/**
+ * @brief   Reconfigure LED based on current state.
+ */
+static void led_update(void) {
+  chVTReset(&led_vt);
+  if (dap_running) {
+    chVTSetContinuous(&led_vt, TIME_MS2I(500), led_timer_cb, NULL);
+  }
+  else if (dap_connected) {
+    palSetLine(LED_PIN);
+  }
+  else {
+    palClearLine(LED_PIN);
+  }
+}
+
+/*===========================================================================*/
+/* DapThread (Core 0) — USB ↔ mailbox bridge.                               */
 /*===========================================================================*/
 
 static THD_WORKING_AREA(waDapThread, DAP_THREAD_WA_SIZE);
 static THD_FUNCTION(DapThread, arg) {
   (void)arg;
 
-  chRegSetThreadName("dap");
-
   while (true) {
-    /* Wait for USB to be configured before arming endpoint. */
-    while (serusbcfg.usbp->state != USB_ACTIVE) {
-      chThdSleepMilliseconds(10);
-    }
+    /* Wait for USB active. */
+    while (USBD1.state != USB_ACTIVE)
+      chThdSleepMilliseconds(100);
 
     /* Arm EP1 OUT to receive a DAP command. */
     chSysLock();
-    usbStartReceiveI(serusbcfg.usbp, DAP_EP, dap_rx_buf, DAP_PACKET_SIZE);
+    usbStartReceiveI(&USBD1, DAP_EP, dap_rx_buf, DAP_PACKET_SIZE);
     chSysUnlock();
 
     /* Wait for USB OUT data. */
     chBSemWait(&dap_rx_sem);
+    if (USBD1.state != USB_ACTIVE) continue;
 
-    /* Check for DAP_TransferAbort (0x07) — handle on Core 0. */
+    /* Handle Transfer Abort locally (must not queue). */
     if (dap_rx_buf[0] == DAP_CMD_TRANSFER_ABORT) {
-      dap_shared.cmd_buf[0] = DAP_CMD_TRANSFER_ABORT;
-      /* Set abort flag for running transfer on Core 1. */
-      dap_shared.resp_buf[0] = DAP_CMD_TRANSFER_ABORT;
-      dap_shared.resp_buf[1] = DAP_OK;
-      dap_shared.resp_len = 2U;
-      /* Signal abort to Core 1. */
-      __DMB();
-      /* Don't go through normal cmd/resp flow — respond immediately. */
+      dap_state.abort = 1U;
+      __DSB();
+      dap_tx_buf[0] = DAP_CMD_TRANSFER_ABORT;
+      dap_tx_buf[1] = DAP_OK;
       chSysLock();
-      usbStartTransmitI(serusbcfg.usbp, DAP_EP, dap_shared.resp_buf,
-                          dap_shared.resp_len);
+      usbStartTransmitI(&USBD1, DAP_EP, dap_tx_buf, 2);
       chSysUnlock();
       continue;
     }
 
-    /* Copy command to shared buffer. */
-    memcpy((void *)dap_shared.cmd_buf, dap_rx_buf, dap_rx_len);
-    dap_shared.resp_ready = 0U;
-    __DSB();
-    dap_shared.cmd_ready = 1U;
-    __DSB();
-    __SEV();  /* Wake Core 1. */
+    /* Allocate packet from pool, fill command, post to mailbox. */
+    dap_packet_t *pkt = chPoolAlloc(&dap_pool);
+    if (pkt == NULL) continue;
+    memcpy(pkt->cmd, dap_rx_buf, dap_rx_len);
+    pkt->cmd_len = dap_rx_len;
 
-    /* Wait for Core 1 to process command. */
-    while (!dap_shared.resp_ready) {
-      chThdSleepMicroseconds(10);
-    }
-    __DSB();
+    chMBPostTimeout(&cmd_mbox, (msg_t)pkt, TIME_INFINITE);
 
-    /* Copy response and send via USB. */
-    memcpy(dap_tx_buf, (const void *)dap_shared.resp_buf, dap_shared.resp_len);
-    dap_shared.resp_ready = 0U;
+    /* Wait for response from DapProcessThread. */
+    msg_t msg;
+    chMBFetchTimeout(&resp_mbox, &msg, TIME_INFINITE);
+    pkt = (dap_packet_t *)msg;
 
+    /* Send response via USB. */
+    memcpy(dap_tx_buf, pkt->resp, pkt->resp_len);
     chSysLock();
-    usbStartTransmitI(serusbcfg.usbp, DAP_EP, dap_tx_buf,
-                        dap_shared.resp_len);
+    usbStartTransmitI(&USBD1, DAP_EP, dap_tx_buf, pkt->resp_len);
     chSysUnlock();
+
+    /* Return packet to pool. */
+    chPoolFree(&dap_pool, pkt);
   }
 }
 
 /*===========================================================================*/
-/* UART Bridge Thread (Core 0) — bidirectional USB CDC ↔ UART1.             */
+/* DapProcessThread (Core 1) — DAP command processor.                        */
 /*===========================================================================*/
 
-static THD_WORKING_AREA(waUartThread, UART_THREAD_WA_SIZE);
-static THD_FUNCTION(UartThread, arg) {
+static THD_WORKING_AREA(waDapProcessThread, DAP_PROC_THREAD_WA_SIZE);
+static THD_FUNCTION(DapProcessThread, arg) {
   (void)arg;
 
-  chRegSetThreadName("uart_bridge");
-
-  uint8_t buf[UART_BRIDGE_BUF_SIZE];
-  size_t n;
+  dap_init(&dap_state);
+  dap_state.evt_dap = &evt_dap;
 
   while (true) {
-    /* USB → UART direction. */
-    n = chnReadTimeout(&SDU1, buf, sizeof(buf), TIME_IMMEDIATE);
-    if (n > 0U) {
-      chnWriteTimeout(&SIOD1, buf, n, TIME_MS2I(10));
-    }
+    msg_t msg;
+    chMBFetchTimeout(&cmd_mbox, &msg, TIME_INFINITE);
+    dap_packet_t *pkt = (dap_packet_t *)msg;
 
-    /* UART → USB direction. */
-    n = chnReadTimeout(&SIOD1, buf, sizeof(buf), TIME_IMMEDIATE);
-    if (n > 0U) {
-      chnWriteTimeout(&SDU1, buf, n, TIME_MS2I(10));
-    }
+    pkt->resp_len = dap_process_command(&dap_state, pkt->cmd, pkt->resp);
 
-    /* Yield if no data in either direction. */
-    chThdSleepMicroseconds(100);
+    chMBPostTimeout(&resp_mbox, (msg_t)pkt, TIME_INFINITE);
   }
+}
+
+/*===========================================================================*/
+/* UART bridge I/O queues and SIO callback.                                  */
+/*===========================================================================*/
+
+static uint8_t uart_rx_qbuf[UART_QUEUE_SIZE];
+static uint8_t uart_tx_qbuf[UART_QUEUE_SIZE];
+static input_queue_t uart_rx_iq;
+static output_queue_t uart_tx_oq;
+
+/**
+ * @brief   Output queue notify — data enqueued, enable SIO TX interrupt.
+ * @note    Called from locked thread context.
+ */
+static void uart_tx_notify(io_queue_t *qp) {
+  (void)qp;
+  sioSetEnableFlagsX(&SIOD1, SIO_EV_TXNOTFULL);
+}
+
+/**
+ * @brief   SIO event callback — drains/fills FIFOs via I/O queues.
+ * @note    Called from ISR context by sio_lld_serve_interrupt.
+ */
+static void uart_sio_cb(SIODriver *siop) {
+  osalSysLockFromISR();
+
+  /* Drain RX FIFO into input queue. */
+  bool got_rx = false;
+  while (!sioIsRXEmptyX(siop)) {
+    msg_t b = sioGetX(siop);
+    iqPutI(&uart_rx_iq, (uint8_t)b);
+    got_rx = true;
+  }
+  if (got_rx)
+    chEvtBroadcastFlagsI(&evt_uart, 1U);
+
+  /* Fill TX FIFO from output queue. */
+  while (!sioIsTXFullX(siop)) {
+    msg_t b = oqGetI(&uart_tx_oq);
+    if (b < MSG_OK) {
+      /* Queue empty — disable TX interrupt. */
+      sioClearEnableFlagsX(siop, SIO_EV_TXNOTFULL);
+      break;
+    }
+    sioPutX(siop, (uint8_t)b);
+  }
+
+  osalSysUnlockFromISR();
 }
 
 /*===========================================================================*/
@@ -430,13 +337,39 @@ static const SIOConfig uart_bridge_config = {
 };
 
 /*===========================================================================*/
-/* Core 1 — bare-metal DAP command processor.                                */
+/* UartThread (Core 0) — I/O queue UART bridge.                              */
+/*===========================================================================*/
+
+static THD_WORKING_AREA(waUartThread, UART_THREAD_WA_SIZE);
+static THD_FUNCTION(UartThread, arg) {
+  (void)arg;
+  uint8_t buf[UART_BRIDGE_BUF_SIZE];
+
+  event_listener_t el;
+  chEvtRegisterMask(&evt_uart, &el, EVENT_MASK(0));
+
+  while (true) {
+    chEvtWaitAnyTimeout(EVENT_MASK(0), TIME_MS2I(10));
+    chEvtGetAndClearFlags(&el);
+
+    /* UART → USB: drain input queue into SDU1. */
+    size_t n = iqReadTimeout(&uart_rx_iq, buf, sizeof(buf), TIME_IMMEDIATE);
+    if (n > 0U)
+      chnWriteTimeout(&SDU1, buf, n, TIME_MS2I(100));
+
+    /* USB → UART: read SDU1 into output queue. */
+    n = chnReadTimeout(&SDU1, buf, sizeof(buf), TIME_IMMEDIATE);
+    if (n > 0U)
+      oqWriteTimeout(&uart_tx_oq, buf, n, TIME_MS2I(100));
+  }
+}
+
+/*===========================================================================*/
+/* Core 1 — ChibiOS SMP instance.                                           */
 /*===========================================================================*/
 
 void c1_main(void) {
-  static dap_data_t dap_state;
-
-  /* Signal Core 0 that we're about to enter the RAM wait loop. */
+  /* Signal Core 0 that we're in RAM. */
   c1_in_ram = 1U;
   __DSB();
   __SEV();
@@ -444,67 +377,83 @@ void c1_main(void) {
   /* Wait in RAM while Core 0 reads flash unique ID. */
   c1_wait_for_init(&init_complete);
 
-  dap_init(&dap_state);
-  dap_state.shared = &dap_shared;
+  /* Proceed with ChibiOS SMP initialization. */
+  chSysWaitSystemState(ch_sys_running);
+  chInstanceObjectInit(&ch1, &ch_core1_cfg);
+  chSysUnlock();
 
+  /* Create DAP processing thread on Core 1. */
+  chThdCreateStatic(waDapProcessThread, sizeof(waDapProcessThread),
+                    NORMALPRIO + 2, DapProcessThread, NULL);
+
+  /* Core 1 main thread idle loop. */
   while (true) {
-    /* Wait for command from Core 0. */
-    while (!dap_shared.cmd_ready) {
-      __WFE();
-    }
-    __DSB();
-    dap_shared.cmd_ready = 0U;
-
-    /* Process the DAP command. */
-    dap_shared.resp_len = dap_process_command(&dap_state,
-                                               dap_shared.cmd_buf,
-                                               dap_shared.resp_buf);
-    __DSB();
-    dap_shared.resp_ready = 1U;
-    __DSB();
-    __SEV();  /* Wake Core 0 if waiting. */
+    chThdSleepMilliseconds(1000);
   }
 }
 
 /*===========================================================================*/
-/* Core 0 — main (ChibiOS RT).                                              */
+/* Core 0 — main (ChibiOS RT SMP).                                          */
 /*===========================================================================*/
 
 int main(void) {
   uint8_t uid[8];
   char serial_hex[17];
 
-  halInit();
-  chSysInit();
-
-  /* Initialize shared memory. */
-  memset(&dap_shared, 0, sizeof(dap_shared));
-
-  /* Initialize DAP receive semaphore. */
-  chBSemObjectInit(&dap_rx_sem, true);
-
   /*
-   * Read flash unique ID for serial number.
-   * Core 1 must be safely in RAM before we exit XIP.
-   * Core 1 signals c1_in_ram=1 then enters c1_wait_for_init() (RAMFUNC).
+   * halInit() launches Core 1 via start_core1() in hal_lld_init().
+   * Core 1 enters c1_main(), signals c1_in_ram, then waits in
+   * c1_wait_for_init (RAMFUNC) while we read the flash unique ID.
    */
-  while (!c1_in_ram) {
-    /* Spin — Core 1 starts very quickly after chSysInit(). */
-  }
+  halInit();
+
+  /* Wait for Core 1 to be safely in RAM before disabling XIP. */
+  while (!c1_in_ram) { }
   __DSB();
 
-  chSysLock();
-  read_flash_unique_id(uid);
-  chSysUnlock();
-
+  /* Read flash unique ID while Core 1 is safely in RAM. */
+  efl_lld_read_unique_id(&EFLD1, uid);
   uid_to_hex(uid, serial_hex, 8U);
+
   dap_set_serial(serial_hex);
   usb_set_serial_string(serial_hex);
 
-  /* Signal Core 1 to proceed with normal operation. */
+  /* Signal Core 1 that flash reading is complete. */
   init_complete = 1U;
   __DSB();
   __SEV();
+
+  /*
+   * Initialize all shared kernel objects before chSysInit().
+   * Core 1 will proceed through chSysWaitSystemState() once
+   * chSysInit() sets ch_sys_running, so everything must be
+   * ready before that.
+   */
+
+  /* Event sources. */
+  chEvtObjectInit(&evt_usb);
+  chEvtObjectInit(&evt_dap);
+  chEvtObjectInit(&evt_uart);
+
+  /* Memory pool and mailboxes for DAP command pipeline. */
+  chPoolObjectInit(&dap_pool, sizeof(dap_packet_t), NULL);
+  chPoolLoadArray(&dap_pool, dap_packets, DAP_POOL_SIZE);
+  chMBObjectInit(&cmd_mbox, cmd_mbox_buf, DAP_POOL_SIZE);
+  chMBObjectInit(&resp_mbox, resp_mbox_buf, DAP_POOL_SIZE);
+
+  /* DAP receive semaphore. */
+  chBSemObjectInit(&dap_rx_sem, true);
+
+  /* Virtual timer for LED blink. */
+  chVTObjectInit(&led_vt);
+
+  /* I/O queues for UART bridge. */
+  iqObjectInit(&uart_rx_iq, uart_rx_qbuf, UART_QUEUE_SIZE, NULL, NULL);
+  oqObjectInit(&uart_tx_oq, uart_tx_qbuf, UART_QUEUE_SIZE,
+               uart_tx_notify, NULL);
+
+  /* Start the RTOS — Core 1 proceeds from chSysWaitSystemState(). */
+  chSysInit();
 
   /* Initialize Serial-over-USB CDC driver (for UART bridge). */
   sduObjectInit(&SDU1);
@@ -516,10 +465,12 @@ int main(void) {
   usbStart(serusbcfg.usbp, &usbcfg);
   usbConnectBus(serusbcfg.usbp);
 
-  /* Configure UART1 pins for bridge (GPIO 4 TX, GPIO 5 RX). */
+  /* Configure UART1 pins and start SIO with callback. */
   palSetPadMode(IOPORT1, UART_TX_PIN, PAL_MODE_ALTERNATE_UART);
   palSetPadMode(IOPORT1, UART_RX_PIN, PAL_MODE_ALTERNATE_UART);
   sioStart(&SIOD1, &uart_bridge_config);
+  SIOD1.cb = uart_sio_cb;
+  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY);
 
   /* Configure LED pin. */
   palSetLineMode(LED_PIN, PAL_MODE_OUTPUT_PUSHPULL);
@@ -532,30 +483,43 @@ int main(void) {
   chThdCreateStatic(waUartThread, sizeof(waUartThread),
                     NORMALPRIO, UartThread, NULL);
 
-  /* Main thread: LED status based on DAP host status. */
+  /* Register for USB and DAP events. */
+  event_listener_t el_usb, el_dap;
+  chEvtRegisterMaskWithFlags(&evt_usb, &el_usb, EVENT_MASK(0),
+      EVT_USB_CONFIGURED | EVT_USB_RESET |
+      EVT_USB_SUSPENDED | EVT_USB_WAKEUP);
+  chEvtRegisterMaskWithFlags(&evt_dap, &el_dap, EVENT_MASK(1),
+      EVT_DAP_CONNECTED | EVT_DAP_DISCONNECTED |
+      EVT_DAP_RUNNING | EVT_DAP_IDLE);
+
+  /* Main thread: event-driven LED status. */
   while (true) {
-    if (serusbcfg.usbp->state == USB_ACTIVE) {
-      if (dap_shared.led_running) {
-        /* Debug session active: fast blink. */
-        palToggleLine(LED_PIN);
-        chThdSleepMilliseconds(100);
-      }
-      else if (dap_shared.led_connect) {
-        /* Connected to debugger, idle: solid ON. */
-        palSetLine(LED_PIN);
-        chThdSleepMilliseconds(250);
-      }
-      else {
-        /* USB active, no debug session: slow blink. */
-        palToggleLine(LED_PIN);
-        chThdSleepMilliseconds(500);
-      }
+    eventmask_t events = chEvtWaitAny(EVENT_MASK(0) | EVENT_MASK(1));
+
+    if (events & EVENT_MASK(0)) {
+      eventflags_t flags = chEvtGetAndClearFlags(&el_usb);
+      if (flags & EVT_USB_CONFIGURED)
+        usb_active = true;
+      if (flags & (EVT_USB_RESET | EVT_USB_SUSPENDED))
+        usb_active = false;
+      if (flags & EVT_USB_WAKEUP)
+        usb_active = true;
     }
-    else {
-      /* USB not connected: LED off. */
-      palClearLine(LED_PIN);
-      chThdSleepMilliseconds(250);
+    if (events & EVENT_MASK(1)) {
+      eventflags_t flags = chEvtGetAndClearFlags(&el_dap);
+      if (flags & EVT_DAP_CONNECTED)
+        dap_connected = true;
+      if (flags & EVT_DAP_DISCONNECTED) {
+        dap_connected = false;
+        dap_running = false;
+      }
+      if (flags & EVT_DAP_RUNNING)
+        dap_running = true;
+      if (flags & EVT_DAP_IDLE)
+        dap_running = false;
     }
+
+    led_update();
   }
 
   return 0;

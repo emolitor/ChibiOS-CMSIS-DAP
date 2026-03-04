@@ -73,12 +73,12 @@
 /* OSLIB options                                                             */
 /*===========================================================================*/
 
-#define CH_CFG_USE_MAILBOXES                FALSE
+#define CH_CFG_USE_MAILBOXES                TRUE
 #define CH_CFG_USE_MEMCHECKS                FALSE
 #define CH_CFG_USE_MEMCORE                  TRUE
 #define CH_CFG_MEMCORE_SIZE                 0
 #define CH_CFG_USE_HEAP                     FALSE
-#define CH_CFG_USE_MEMPOOLS                 FALSE
+#define CH_CFG_USE_MEMPOOLS                 TRUE
 #define CH_CFG_USE_OBJ_FIFOS                FALSE
 #define CH_CFG_USE_PIPES                    FALSE
 #define CH_CFG_USE_OBJ_CACHES              FALSE

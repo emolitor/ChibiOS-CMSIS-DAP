@@ -1,4 +1,21 @@
 /*
+ * Copyright (C) 2026 Eric Molitor <github.com/emolitor>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
  * CMSIS-DAP v2 protocol handler for RP2040 debug probe.
  */
 
@@ -6,6 +23,7 @@
 #define DAP_H
 
 #include <stdint.h>
+#include "ch.h"
 
 /*===========================================================================*/
 /* DAP packet configuration.                                                 */
@@ -120,18 +138,24 @@
 #define DAP_CAP_SWD             (1U << 0)
 
 /*===========================================================================*/
-/* Shared memory for inter-core communication.                               */
+/* DAP packet for memory pool allocation.                                    */
 /*===========================================================================*/
 
 typedef struct {
-  volatile uint32_t cmd_ready;
-  volatile uint32_t resp_ready;
-  volatile uint32_t resp_len;
-  volatile uint8_t  led_connect;    /* DAP_HostStatus: connected LED */
-  volatile uint8_t  led_running;    /* DAP_HostStatus: running LED */
-  uint8_t  cmd_buf[DAP_PACKET_SIZE];
-  uint8_t  resp_buf[DAP_PACKET_SIZE];
-} __attribute__((aligned(4))) dap_shared_t;
+  uint8_t           cmd[DAP_PACKET_SIZE];
+  uint8_t           resp[DAP_PACKET_SIZE];
+  uint32_t          cmd_len;
+  uint32_t          resp_len;
+} dap_packet_t;
+
+/*===========================================================================*/
+/* DAP event flags (broadcast via evt_dap).                                  */
+/*===========================================================================*/
+
+#define EVT_DAP_CONNECTED               (1U << 0)
+#define EVT_DAP_DISCONNECTED            (1U << 1)
+#define EVT_DAP_RUNNING                 (1U << 2)
+#define EVT_DAP_IDLE                    (1U << 3)
 
 /*===========================================================================*/
 /* DAP state structure.                                                      */
@@ -154,11 +178,11 @@ typedef struct {
   /* Transfer match. */
   uint32_t  match_mask;
 
-  /* Abort flag (set by Core 0 via DAP_TransferAbort). */
+  /* Abort flag (set by DapThread via DAP_TransferAbort). */
   volatile uint8_t abort;
 
-  /* Pointer to shared memory (for LED status updates). */
-  dap_shared_t *shared;
+  /* Event source for broadcasting DAP state changes. */
+  event_source_t *evt_dap;
 } dap_data_t;
 
 /*===========================================================================*/

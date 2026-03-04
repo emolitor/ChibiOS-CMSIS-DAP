@@ -1,11 +1,29 @@
 /*
+ * Copyright (C) 2026 Eric Molitor <github.com/emolitor>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
  * CMSIS-DAP v2 protocol handler for RP2040 debug probe.
  *
  * Implements the command dispatcher and all required DAP commands.
- * This code runs on Core 1 (bare-metal, no ChibiOS).
+ * Runs on Core 1 as a ChibiOS SMP thread.
  */
 
 #include <string.h>
+#include "ch.h"
 #include "dap.h"
 #include "swd.h"
 
@@ -14,7 +32,7 @@
 /*===========================================================================*/
 
 static const char dap_vendor[]      = "ChibiOS";
-static const char dap_product[]     = "CMSIS-DAP v2";
+static const char dap_product[]     = "ChibiOS Probe (CMSIS-DAP)";
 static char       dap_serial[17]    = "0000000000000000";
 static const char dap_cmsis_ver[]   = "2.1.1";
 static const char dap_fw_ver[]      = "1.0.0";
@@ -52,18 +70,11 @@ static uint8_t swd_request_byte(uint32_t request) {
 }
 
 /*===========================================================================*/
-/* Delay helper (bare-metal, approximate).                                   */
+/* Delay helper (ChibiOS thread sleep).                                      */
 /*===========================================================================*/
 
 static void delay_ms(uint32_t ms) {
-  /* At ~125MHz, ~125000 cycles per ms. Inner loop is ~4 cycles. */
-  volatile uint32_t count;
-  while (ms--) {
-    count = 31250U;
-    while (count--) {
-      __asm__ volatile ("");
-    }
-  }
+  chThdSleepMilliseconds(ms);
 }
 
 /*===========================================================================*/
@@ -143,13 +154,15 @@ static uint32_t dap_host_status(dap_data_t *dap, const uint8_t *req,
   resp[0] = DAP_CMD_HOST_STATUS;
   resp[1] = DAP_OK;
 
-  /* Write LED state to shared memory for Core 0. */
-  if (dap->shared != NULL) {
+  /* Broadcast LED state change as event flags. */
+  if (dap->evt_dap != NULL) {
     if (type == 0U) {
-      dap->shared->led_connect = status;
+      chEvtBroadcastFlags(dap->evt_dap,
+                          status ? EVT_DAP_CONNECTED : EVT_DAP_DISCONNECTED);
     }
     else if (type == 1U) {
-      dap->shared->led_running = status;
+      chEvtBroadcastFlags(dap->evt_dap,
+                          status ? EVT_DAP_RUNNING : EVT_DAP_IDLE);
     }
   }
 

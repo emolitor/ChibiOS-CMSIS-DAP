@@ -1,4 +1,21 @@
 /*
+ * Copyright (C) 2026 Eric Molitor <github.com/emolitor>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
  * USB composite device configuration for CMSIS-DAP v2 + CDC ACM.
  *
  * Descriptor layout:
@@ -216,10 +233,11 @@ static const uint8_t string1[] = {
 
 /* String 2: Product (must contain "CMSIS-DAP" for OpenOCD auto-detect). */
 static const uint8_t string2[] = {
-  USB_DESC_BYTE(50), USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
-  'C', 0, 'M', 0, 'S', 0, 'I', 0, 'S', 0, '-', 0, 'D', 0, 'A', 0,
-  'P', 0, ' ', 0, 'v', 0, '2', 0, ' ', 0, 'D', 0, 'e', 0, 'b', 0,
-  'u', 0, 'g', 0, ' ', 0, 'P', 0, 'r', 0, 'o', 0, 'b', 0, 'e', 0
+  USB_DESC_BYTE(52), USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
+  'C', 0, 'h', 0, 'i', 0, 'b', 0, 'i', 0, 'O', 0, 'S', 0, ' ', 0,
+  'P', 0, 'r', 0, 'o', 0, 'b', 0, 'e', 0, ' ', 0, '(', 0, 'C', 0,
+  'M', 0, 'S', 0, 'I', 0, 'S', 0, '-', 0, 'D', 0, 'A', 0, 'P', 0,
+  ')', 0
 };
 
 /* String 3: Serial Number (mutable, populated at boot from flash unique ID). */
@@ -341,18 +359,26 @@ static void usb_event(USBDriver *usbp, usbevent_t event) {
     usbInitEndpointI(usbp, CDC_DATA_EP, &cdc_data_ep_config);
     usbInitEndpointI(usbp, CDC_INT_EP, &cdc_int_ep_config);
     sduConfigureHookI(&SDU1);
+    chEvtBroadcastFlagsI(&evt_usb, EVT_USB_CONFIGURED);
     chSysUnlockFromISR();
     return;
   case USB_EVENT_RESET:
   case USB_EVENT_UNCONFIGURED:
+    chSysLockFromISR();
+    sduSuspendHookI(&SDU1);
+    chEvtBroadcastFlagsI(&evt_usb, EVT_USB_RESET);
+    chSysUnlockFromISR();
+    return;
   case USB_EVENT_SUSPEND:
     chSysLockFromISR();
     sduSuspendHookI(&SDU1);
+    chEvtBroadcastFlagsI(&evt_usb, EVT_USB_SUSPENDED);
     chSysUnlockFromISR();
     return;
   case USB_EVENT_WAKEUP:
     chSysLockFromISR();
     sduWakeupHookI(&SDU1);
+    chEvtBroadcastFlagsI(&evt_usb, EVT_USB_WAKEUP);
     chSysUnlockFromISR();
     return;
   case USB_EVENT_STALLED:

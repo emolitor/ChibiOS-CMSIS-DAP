@@ -35,7 +35,7 @@
 #define HAL_USE_CAN                         FALSE
 #define HAL_USE_CRY                         FALSE
 #define HAL_USE_DAC                         FALSE
-#define HAL_USE_EFL                         FALSE
+#define HAL_USE_EFL                         TRUE
 #define HAL_USE_GPT                         FALSE
 #define HAL_USE_I2C                         FALSE
 #define HAL_USE_I2S                         FALSE
@@ -70,6 +70,6 @@
 /*===========================================================================*/
 
 #define SIO_DEFAULT_BITRATE                 115200
-#define SIO_USE_SYNCHRONIZATION             TRUE
+#define SIO_USE_SYNCHRONIZATION             FALSE
 
 #endif /* HALCONF_H */

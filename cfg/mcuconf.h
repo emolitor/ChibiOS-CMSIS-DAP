@@ -17,17 +17,13 @@
 #ifndef MCUCONF_H
 #define MCUCONF_H
 
-/*
- * RP2040_MCUCONF drivers configuration.
- *
- * IRQ priorities:
- * 3...0        Lowest...Highest (2 bits on Cortex-M0+).
- *
- * DMA priorities:
- * 0...1        Lowest...Highest.
- */
-
+#if defined(TARGET_RP2040)
 #define RP2040_MCUCONF
+#elif defined(TARGET_RP2350)
+#define RP2350_MCUCONF
+#else
+#error "Define TARGET_RP2040 or TARGET_RP2350 (passed via Makefile UDEFS)"
+#endif
 
 /*
  * HAL driver system settings.
@@ -42,10 +38,6 @@
  * IRQ system settings.
  */
 #define RP_IRQ_SYSTICK_PRIORITY             2
-#define RP_IRQ_TIMER_ALARM0_PRIORITY        2
-#define RP_IRQ_TIMER_ALARM1_PRIORITY        2
-#define RP_IRQ_TIMER_ALARM2_PRIORITY        2
-#define RP_IRQ_TIMER_ALARM3_PRIORITY        2
 #define RP_IRQ_UART0_PRIORITY               3
 #define RP_IRQ_UART1_PRIORITY               3
 #define RP_IRQ_SPI0_PRIORITY                2

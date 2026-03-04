@@ -108,7 +108,9 @@
 #define CH_DBG_ENABLE_ASSERTS               FALSE
 #define CH_DBG_TRACE_MASK                   CH_DBG_TRACE_MASK_DISABLED
 #define CH_DBG_TRACE_BUFFER_SIZE            128
+#ifndef CH_DBG_ENABLE_STACK_CHECK
 #define CH_DBG_ENABLE_STACK_CHECK           FALSE
+#endif
 #define CH_DBG_FILL_THREADS                 FALSE
 #define CH_DBG_THREADS_PROFILING            FALSE
 

@@ -54,15 +54,38 @@ endif
 ##############################################################################
 
 ##############################################################################
-# Architecture or project specific options
+# Target selection
 #
 
-ifeq ($(USE_FPU),)
-  USE_FPU = no
+# When TARGET is not specified, build all targets.
+ifndef TARGET
+.PHONY: all clean
+all clean:
+	$(MAKE) TARGET=rp2040 $@
+	$(MAKE) TARGET=rp2350 $@
+else
+
+ifeq ($(TARGET),rp2040)
+  MCU  = cortex-m0plus
+  ifeq ($(USE_FPU),)
+    USE_FPU = no
+  endif
+  TARGET_DEFS = -DTARGET_RP2040
+else ifeq ($(TARGET),rp2350)
+  MCU  = cortex-m33
+  ifeq ($(USE_FPU),)
+    USE_FPU = softfp
+  endif
+  ifeq ($(USE_FPU_OPT),)
+    USE_FPU_OPT = -mfloat-abi=$(USE_FPU) -mfpu=fpv5-sp-d16
+  endif
+  TARGET_DEFS = -DTARGET_RP2350
+else
+  $(error Unknown TARGET=$(TARGET). Use rp2040 or rp2350)
 endif
 
 #
-# Architecture or project specific options
+# Target selection
 ##############################################################################
 
 ##############################################################################
@@ -71,12 +94,10 @@ endif
 
 PROJECT = ch
 
-MCU  = cortex-m0plus
-
 # ChibiOS location — default to ./ChibiOS checked out via 'make chibios'.
 CHIBIOS  ?= ./ChibiOS
 CONFDIR  := ./cfg
-BUILDDIR := ./build
+BUILDDIR := ./build/$(TARGET)
 DEPDIR   := ./.dep
 
 PICOTOOL ?= picotool
@@ -99,18 +120,25 @@ else
 
 # Licensing files.
 include $(CHIBIOS)/os/license/license.mk
-# Startup files.
+# Target-specific startup, platform, board, port, and linker script.
+ifeq ($(TARGET),rp2040)
 include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_rp2040.mk
-# HAL-OSAL files.
-include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/ports/RP/RP2040/platform.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO_RP2040/board.mk
+include $(CHIBIOS)/os/common/ports/ARMv6-M/compilers/GCC/mk/port_rp2.mk
+LDSCRIPT = $(STARTUPLD)/RP2040_FLASH.ld
+else ifeq ($(TARGET),rp2350)
+include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_rp2350.mk
+include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform.mk
+include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
+include $(CHIBIOS)/os/common/ports/ARMv8-M-ML/compilers/GCC/mk/port_rp2.mk
+LDSCRIPT = $(STARTUPLD)/RP2350_FLASH.ld
+endif
+# HAL-OSAL files.
+include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
 # RTOS files.
 include $(CHIBIOS)/os/rt/rt.mk
-include $(CHIBIOS)/os/common/ports/ARMv6-M/compilers/GCC/mk/port_rp2.mk
-
-LDSCRIPT= $(STARTUPLD)/RP2040_FLASH.ld
 
 CSRC = $(ALLCSRC) \
        main.c \
@@ -138,9 +166,9 @@ CPPWARN = -Wall -Wextra -Wundef
 # User section
 #
 
-UDEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1
+UDEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 $(TARGET_DEFS)
 
-UADEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1
+UADEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 $(TARGET_DEFS)
 
 UINCDIR =
 
@@ -177,6 +205,9 @@ endif
 #
 # Custom rules — build
 ##############################################################################
+
+# End of TARGET guard.
+endif
 
 ##############################################################################
 # ChibiOS checkout (works without ChibiOS present)

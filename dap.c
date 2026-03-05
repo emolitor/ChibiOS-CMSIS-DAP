@@ -863,6 +863,109 @@ static uint32_t dap_reset_target(uint8_t *resp) {
 }
 
 /*===========================================================================*/
+/* DAP_ExecuteCommands (0x7F) / DAP_QueueCommands (0x7E).                    */
+/*===========================================================================*/
+
+/**
+ * @brief   Compute request consumption (bytes) for an embedded command.
+ */
+static uint32_t dap_request_size(const uint8_t *req) {
+  uint32_t idx;
+  uint32_t n, count, info, bytes;
+
+  switch (req[0]) {
+  case DAP_CMD_DISCONNECT:
+  case DAP_CMD_TRANSFER_ABORT:
+  case DAP_CMD_RESET_TARGET:
+    return 1U;
+  case DAP_CMD_INFO:
+  case DAP_CMD_CONNECT:
+  case DAP_CMD_SWD_CONFIGURE:
+    return 2U;
+  case DAP_CMD_HOST_STATUS:
+  case DAP_CMD_DELAY:
+    return 3U;
+  case DAP_CMD_SWJ_CLOCK:
+    return 5U;
+  case DAP_CMD_TRANSFER_CONFIGURE:
+  case DAP_CMD_WRITE_ABORT:
+    return 6U;
+  case DAP_CMD_SWJ_PINS:
+    return 7U;
+
+  case DAP_CMD_SWJ_SEQUENCE:
+    count = req[1];
+    if (count == 0U)
+      count = 256U;
+    return 2U + ((count + 7U) >> 3);
+
+  case DAP_CMD_SWD_SEQUENCE:
+    idx = 2U;
+    for (n = 0U; n < req[1]; n++) {
+      info = req[idx++];
+      count = info & 0x3FU;
+      if (count == 0U)
+        count = 64U;
+      bytes = (count + 7U) >> 3;
+      if (!(info & 0x80U))
+        idx += bytes;  /* Output: request carries data. */
+    }
+    return idx;
+
+  case DAP_CMD_TRANSFER:
+    /* cmd + dap_index + count, then per-transfer: request_byte [+ data]. */
+    idx = 3U;
+    for (n = 0U; n < req[2]; n++) {
+      uint32_t request = req[idx++];
+      if (request & DAP_TRANSFER_MATCH_MASK) {
+        idx += 4U;
+      }
+      else if (request & DAP_TRANSFER_RnW) {
+        if (request & DAP_TRANSFER_MATCH_VALUE)
+          idx += 4U;
+      }
+      else {
+        idx += 4U;  /* Write data. */
+      }
+    }
+    return idx;
+
+  case DAP_CMD_TRANSFER_BLOCK:
+    /* cmd + dap_index + count(2) + request. */
+    count = (uint32_t)req[2] | ((uint32_t)req[3] << 8);
+    if (req[4] & DAP_TRANSFER_RnW)
+      return 5U;  /* Read: no data in request. */
+    return 5U + count * 4U;
+
+  default:
+    /* Unknown command — cannot determine size. Return 1 to avoid
+     * infinite loop; the packet is likely malformed. */
+    return 1U;
+  }
+}
+
+static uint32_t dap_execute_commands(dap_data_t *dap, const uint8_t *req,
+                                      uint8_t *resp) {
+  uint32_t num = req[1];
+  uint32_t req_offset = 2U;
+  uint32_t resp_offset = 2U;
+  uint32_t n;
+
+  resp[0] = DAP_CMD_EXECUTE_COMMANDS;
+  resp[1] = (uint8_t)num;
+
+  for (n = 0U; n < num; n++) {
+    uint32_t req_len  = dap_request_size(&req[req_offset]);
+    uint32_t resp_len = dap_process_command(dap, &req[req_offset],
+                                             &resp[resp_offset]);
+    req_offset  += req_len;
+    resp_offset += resp_len;
+  }
+
+  return resp_offset;
+}
+
+/*===========================================================================*/
 /* Public API.                                                               */
 /*===========================================================================*/
 
@@ -934,6 +1037,10 @@ uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
 
   case DAP_CMD_SWD_SEQUENCE:
     return dap_swd_sequence(dap, request, response);
+
+  case DAP_CMD_QUEUE_COMMANDS:
+  case DAP_CMD_EXECUTE_COMMANDS:
+    return dap_execute_commands(dap, request, response);
 
   /* Unsupported commands return DAP_ERROR. */
   case DAP_CMD_JTAG_SEQUENCE:

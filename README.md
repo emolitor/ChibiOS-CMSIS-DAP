@@ -15,17 +15,8 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 
 ## Comparison with Other Adapters
 
-| Adapter | Max SWD | Notes |
-|---------|---------|-------|
-| **ChibiOS Probe (RP2350)** | **25 MHz** | PIO hardware state machine |
-| **ChibiOS Probe (RP2040)** | **20 MHz** | PIO hardware state machine |
-| Raspberry Pi Debug Probe | ~24 MHz | Same PIO approach, retail PCB |
-| ST-Link V3 | ~24 MHz | ST's current-gen probe |
-| J-Link BASE | ~15 MHz | SEGGER entry-level |
-| DAPLink (LPC11U35) | ~10 MHz | Bit-bang GPIO |
-| ST-Link V2 | ~4 MHz | ST's older probe |
-
-Only SEGGER's premium J-Links (~50 MHz, dedicated SWD hardware) significantly outperform the PIO-based approach.
+Performance is comparable to the Retail Raspberry Pi Debug Probe. I was able
+to sustain 25MHz SWD without any issues with a RP2350.
 
 ## Pin Assignment
 

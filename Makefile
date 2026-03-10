@@ -131,13 +131,11 @@ else ifeq ($(TARGET),rp2350)
 include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_rp2350.mk
 include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
-include $(CHIBIOS)/os/common/ports/ARMv8-M-ML/compilers/GCC/mk/port_rp2.mk
+include $(CHIBIOS)/os/common/ports/ARMv8-M-ML-ALT/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2350_FLASH.ld
 endif
-# HAL-OSAL files.
 include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
-# RTOS files.
 include $(CHIBIOS)/os/rt/rt.mk
 
 CSRC = $(ALLCSRC) \
@@ -166,7 +164,7 @@ CPPWARN = -Wall -Wextra -Wundef
 # User section
 #
 
-UDEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 $(TARGET_DEFS)
+UDEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 -DRP_PIO_REQUIRED $(TARGET_DEFS)
 
 UADEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 $(TARGET_DEFS)
 

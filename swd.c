@@ -20,6 +20,7 @@
  *
  * Uses PIO0 SM0 for deterministic SWD timing.
  * Pad configuration uses PADS_BANK0 and IO_BANK0 CMSIS structs.
+ * State machine allocation and program loading via ChibiOS PIO LLD.
  * This code runs on Core 1.
  */
 
@@ -27,17 +28,14 @@
 #include "pio_swd.h"
 
 /*===========================================================================*/
-/* PIO instance and state machine selection.                                 */
+/* PIO state machine (allocated via PIO LLD).                                */
 /*===========================================================================*/
 
-#define SWD_PIO         PIO0
-#define SWD_SM          0U
+/* Allocated PIO state machine (NULL when disconnected). */
+static const rp_pio_sm_t *swd_sm;
 
-/* IO_BANK0 function select: PIO0 = 6 */
-#define FUNCSEL_PIO0    6U
-
-/* Program offset in instruction memory (set by pio_swd_init). */
-static uint32_t prog_offset;
+/* Program offset in instruction memory (set by pioProgramLoad). */
+static int32_t prog_offset;
 
 /*===========================================================================*/
 /* Pad configuration registers (CMSIS struct access).                        */
@@ -55,7 +53,6 @@ static uint32_t prog_offset;
 
 /* IO_BANK0 function select: SIO = 5 */
 #define FUNCSEL_SIO             5U
-#define FUNCSEL_NULL            31U
 
 /*===========================================================================*/
 /* PIO SWD helper functions.                                                 */
@@ -65,18 +62,20 @@ static uint32_t prog_offset;
  * @brief   Write bits via PIO (fire-and-forget).
  */
 static inline void probe_write_bits(uint32_t bit_count, uint32_t data) {
-  pio_swd_put(SWD_PIO, SWD_SM,
-              pio_swd_cmd(bit_count, true, PIO_SWD_CMD_WRITE, prog_offset));
-  pio_swd_put(SWD_PIO, SWD_SM, data);
+  pioSmPut(swd_sm,
+           pio_swd_cmd(bit_count, true, PIO_SWD_CMD_WRITE,
+                       (uint32_t)prog_offset));
+  pioSmPut(swd_sm, data);
 }
 
 /**
  * @brief   Read bits via PIO (blocking).
  */
 static inline uint32_t probe_read_bits(uint32_t bit_count) {
-  pio_swd_put(SWD_PIO, SWD_SM,
-              pio_swd_cmd(bit_count, false, PIO_SWD_CMD_READ, prog_offset));
-  uint32_t raw = pio_swd_get(SWD_PIO, SWD_SM);
+  pioSmPut(swd_sm,
+           pio_swd_cmd(bit_count, false, PIO_SWD_CMD_READ,
+                       (uint32_t)prog_offset));
+  uint32_t raw = pioSmGet(swd_sm);
   if (bit_count < 32U)
     raw >>= (32U - bit_count);
   return raw;
@@ -86,10 +85,10 @@ static inline uint32_t probe_read_bits(uint32_t bit_count) {
  * @brief   Clock with SWDIO as input (hi-Z turnaround clocks).
  */
 static inline void probe_hiz_clocks(uint32_t bit_count) {
-  pio_swd_put(SWD_PIO, SWD_SM,
-              pio_swd_cmd(bit_count, false, PIO_SWD_CMD_TURNAROUND,
-                          prog_offset));
-  pio_swd_put(SWD_PIO, SWD_SM, 0U);  /* Dummy data (write_cmd does pull). */
+  pioSmPut(swd_sm,
+           pio_swd_cmd(bit_count, false, PIO_SWD_CMD_TURNAROUND,
+                       (uint32_t)prog_offset));
+  pioSmPut(swd_sm, 0U);  /* Dummy data (write_cmd does pull). */
 }
 
 /*===========================================================================*/
@@ -100,15 +99,21 @@ static inline void probe_hiz_clocks(uint32_t bit_count) {
  * @brief   Initialize SWD pins and PIO state machine.
  */
 void swd_init(uint32_t clk_div) {
+  /* Allocate PIO0 SM0 via PIO LLD (no ISR — polling only). */
+  if (swd_sm == NULL) {
+    swd_sm = pioSmAlloc(RP_PIO0_BLOCK, 0U, 0U, NULL, NULL);
+    prog_offset = pioProgramLoad(RP_PIO0_BLOCK, &pio_swd_program);
+  }
+
   /* SWCLK: PIO-controlled via side-set, fast slew, input enabled. */
   PAD_REG(SWD_PIN_SWCLK) = PAD_IE | PAD_SLEWFAST;
-  IO_CTRL(SWD_PIN_SWCLK) = FUNCSEL_PIO0;
+  pioSmSetPinFunctionX(swd_sm, SWD_PIN_SWCLK);
   SIO_GPIO_OUT_SET = SWCLK_BIT;
   SIO_GPIO_OE_SET  = SWCLK_BIT;
 
   /* SWDIO: PIO-controlled via out/in pins, fast slew, pull-up, input. */
   PAD_REG(SWD_PIN_SWDIO) = PAD_IE | PAD_PUE | PAD_SLEWFAST;
-  IO_CTRL(SWD_PIN_SWDIO) = FUNCSEL_PIO0;
+  pioSmSetPinFunctionX(swd_sm, SWD_PIN_SWDIO);
   SIO_GPIO_OUT_SET = SWDIO_BIT;
   SIO_GPIO_OE_SET  = SWDIO_BIT;
 
@@ -118,36 +123,37 @@ void swd_init(uint32_t clk_div) {
   SIO_GPIO_OUT_CLR = NRESET_BIT;
   SIO_GPIO_OE_CLR  = NRESET_BIT;
 
-  /* Release PIO0 from reset (ChibiOS has no PIO driver). */
-  hal_lld_peripheral_unreset(RESETS_ALLREG_PIO0);
-
-  /* Initialize PIO state machine. */
-  prog_offset = pio_swd_init(SWD_PIO, SWD_SM, SWD_PIN_SWCLK, SWD_PIN_SWDIO);
+  /* Configure and start state machine. */
+  pio_swd_init(swd_sm, (uint32_t)prog_offset, SWD_PIN_SWCLK, SWD_PIN_SWDIO);
 
   /* Set clock divider. */
-  pio_swd_set_clkdiv(SWD_PIO, SWD_SM, clk_div);
+  pio_swd_set_clkdiv(swd_sm, clk_div);
 }
 
 /**
  * @brief   Update PIO clock divider.
  */
 void swd_set_clkdiv(uint32_t clk_div) {
-  pio_swd_set_clkdiv(SWD_PIO, SWD_SM, clk_div);
+  pio_swd_set_clkdiv(swd_sm, clk_div);
 }
 
 /**
  * @brief   Tri-state all SWD pins, disable PIO.
  */
 void swd_off(void) {
-  pio_swd_deinit(SWD_PIO, SWD_SM);
+  if (swd_sm != NULL) {
+    pioProgramUnload(RP_PIO0_BLOCK, prog_offset, PIO_SWD_PROGRAM_LEN);
+    pioSmFree(swd_sm);
+    swd_sm = NULL;
+  }
 
   SIO_GPIO_OE_CLR = SWCLK_BIT | SWDIO_BIT | NRESET_BIT;
   PAD_REG(SWD_PIN_SWCLK)  = PAD_OD;
   PAD_REG(SWD_PIN_SWDIO)  = PAD_OD;
   PAD_REG(SWD_PIN_NRESET) = PAD_OD;
-  IO_CTRL(SWD_PIN_SWCLK)  = FUNCSEL_NULL;
-  IO_CTRL(SWD_PIN_SWDIO)  = FUNCSEL_NULL;
-  IO_CTRL(SWD_PIN_NRESET) = FUNCSEL_NULL;
+  IO_CTRL(SWD_PIN_SWCLK)  = RP_PIO_FUNCSEL_NULL;
+  IO_CTRL(SWD_PIN_SWDIO)  = RP_PIO_FUNCSEL_NULL;
+  IO_CTRL(SWD_PIN_NRESET) = RP_PIO_FUNCSEL_NULL;
 }
 
 /**

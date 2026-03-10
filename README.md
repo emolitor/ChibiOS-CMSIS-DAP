@@ -7,16 +7,31 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 - **CMSIS-DAP v2** over USB bulk endpoints (WinUSB — driverless on Windows)
 - **UART bridge** via USB CDC ACM at 115200 baud
 - **Dual-core SMP**: Core 0 handles USB, Core 1 processes DAP commands
-- **PIO-based SWD** using a hardware state machine for deterministic timing (derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe))
+- **PIO-based SWD** Derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe)
 - **Dual-target support**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
-- **Unique serial number** read from flash chip at boot
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)
 
+## Performance
 
-## Comparison with Other Adapters
+Performance is comparable to the Retail Raspberry Pi Debug Probe.
 
-Performance is comparable to the Retail Raspberry Pi Debug Probe. I was able
-to sustain 25MHz SWD without any issues with a RP2350.
+### SWD Clock Speed
+
+| Probe | System Clock | PIO Cycles/Bit | Theoretical Max | Tested Max |
+|-------|-------------|-----------------|-----------------|------------|
+| RP2040 | 200 MHz | 4 | 50 MHz | 25 MHz |
+| RP2350 | 150 MHz | 4 | 37.5 MHz | 25 MHz |
+
+The maximum tested speed is limited by the target's SWD debug port, not the probe's PIO.
+
+### Throughput (64 KB SRAM read via OpenOCD)
+
+| Probe | SWD Clock | Throughput |
+|-------|-----------|------------|
+| RP2040 | 15 MHz | 526 KB/s |
+| RP2350 | 25 MHz | 526 KB/s |
+
+Realistic throughput plateaus above ~10 MHz as USB bulk transfer overhead becomes the bottleneck.
 
 ## Pin Assignment
 
@@ -38,7 +53,7 @@ These match the Raspberry Pi Debug Probe pinout, so any wiring guide for that pr
 - **Interface 0**: CMSIS-DAP v2 (Vendor class, Bulk EP1 IN/OUT)
 - **Interfaces 1-2**: CDC ACM UART bridge (Bulk EP2 IN/OUT, Interrupt EP3 IN)
 
-Includes a BOS descriptor with MS OS 2.0 Platform Capability for automatic WinUSB driver binding on Windows.
+Includes a BOS descriptor with Platform Capability for automatic WinUSB driver binding on Windows.
 
 ## Building
 
@@ -57,7 +72,7 @@ make                          # build both targets (produces build/rp2040/ch.elf
 
 ### Flash
 
-1. Hold BOOTSEL on the Pico and plug it in (or replug) — it mounts as a USB mass storage drive (e.g., `RPI-RP2`)
+1. Hold BOOTSEL on the Pico and plug it in — it mounts as a USB mass storage drive (e.g., `RPI-RP2`)
 2. Build the UF2: `make`
 3. Copy `build/rp2040/ch.uf2` or `build/rp2350/ch.uf2` to the drive — the Pico reboots automatically
 

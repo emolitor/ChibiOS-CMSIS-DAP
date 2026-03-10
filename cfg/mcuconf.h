@@ -19,8 +19,17 @@
 
 #if defined(TARGET_RP2040)
 #define RP2040_MCUCONF
+#define RP_PIO_NUM_BLOCKS                   2
+/*
+ * PLL_SYS: 200 MHz (VCO 1200 MHz / 6 / 1).
+ */
+#define RP_PLL_SYS_REFDIV                   1U
+#define RP_PLL_SYS_VCO_FREQ                 1200000000U
+#define RP_PLL_SYS_POSTDIV1                 6U
+#define RP_PLL_SYS_POSTDIV2                 1U
 #elif defined(TARGET_RP2350)
 #define RP2350_MCUCONF
+#define RP_PIO_NUM_BLOCKS                   3
 #else
 #error "Define TARGET_RP2040 or TARGET_RP2350 (passed via Makefile UDEFS)"
 #endif

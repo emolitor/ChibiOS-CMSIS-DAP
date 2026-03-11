@@ -436,7 +436,6 @@ int main(void) {
    * c1_wait_for_init (RAMFUNC) while we read the flash unique ID.
    */
   halInit();
-  pioInit();
 
   /* Wait for Core 1 to be safely in RAM before disabling XIP. */
   while (!c1_in_ram) { }

@@ -991,7 +991,7 @@ static uint32_t dap_execute_commands(dap_data_t *dap, const uint8_t *req,
   uint32_t resp_offset = 2U;
   uint32_t n;
 
-  resp[0] = DAP_CMD_EXECUTE_COMMANDS;
+  resp[0] = req[0];
   resp[1] = (uint8_t)num;
 
   for (n = 0U; n < num; n++) {

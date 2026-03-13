@@ -346,7 +346,7 @@ static THD_FUNCTION(DapProcessThread, arg) {
           TIME_MS2I(rtt.poll_interval_ms)) {
         rtt_last_poll = now;
 
-        static uint8_t rtt_buf[64];
+        static uint8_t rtt_buf[RTT_READ_MAX];
         uint32_t n = rtt_poll(&rtt, dap_state.debug_port,
                               dap_state.idle_cycles,
                               dap_state.turnaround, dap_state.data_phase,

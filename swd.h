@@ -72,6 +72,8 @@ void swd_off(void);
 uint8_t swd_transfer(uint32_t request, uint32_t *data,
                       uint32_t clk_div, uint32_t idle_cycles,
                       uint32_t turnaround, uint32_t data_phase);
+void swd_line_reset(void);
+void swd_targetsel(uint32_t target_id, uint32_t turnaround);
 void swj_sequence(uint32_t count, const uint8_t *data, uint32_t clk_div);
 void swd_sequence(uint32_t info, const uint8_t *swdo, uint8_t *swdi,
                    uint32_t clk_div);

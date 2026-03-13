@@ -16,15 +16,17 @@
  */
 
 /*
- * USB composite device configuration for CMSIS-DAP v2 + CDC ACM.
+ * USB composite device configuration for CMSIS-DAP v2 + 2× CDC ACM.
  *
  * Descriptor layout:
  *   Interface 0: CMSIS-DAP v2 (Vendor class, Bulk EP1 IN/OUT)
- *   Interface 1: CDC Control (EP3 IN interrupt)
- *   Interface 2: CDC Data (EP2 IN/OUT bulk)
+ *   Interface 1: CDC Control — UART bridge (EP3 IN interrupt)
+ *   Interface 2: CDC Data — UART bridge (EP2 IN/OUT bulk)
+ *   Interface 3: CDC Control — RTT console (EP5 IN interrupt)
+ *   Interface 4: CDC Data — RTT console (EP4 IN/OUT bulk)
  *
  * Includes BOS descriptor with MS OS 2.0 Platform Capability for
- * automatic WinUSB driver binding on Windows.
+ * automatic WinUSB driver binding on Windows (interface 0 only).
  */
 
 #include "hal.h"
@@ -38,6 +40,17 @@ extern void dap_usb_out_cb(USBDriver *usbp, usbep_t ep);
 extern void dap_usb_in_cb(USBDriver *usbp, usbep_t ep);
 
 SerialUSBDriver SDU1;
+SerialUSBDriver SDU2;
+
+/*===========================================================================*/
+/* RTT CDC DTR tracking.                                                     */
+/*===========================================================================*/
+
+static volatile uint8_t rtt_line_state;
+
+bool rtt_cdc_dtr_active(void) {
+  return (rtt_line_state & 1U) != 0U;
+}
 
 /*===========================================================================*/
 /* USB Device Descriptor.                                                    */
@@ -72,16 +85,21 @@ static const USBDescriptor device_descriptor = {
  * Total length:
  *   Config(9) +
  *   IF0(9) + EP1_OUT(7) + EP1_IN(7) = 23 (CMSIS-DAP) +
- *   IAD(8) +
- *   IF1(9) + CDC_Header(5) + CDC_CallMgmt(5) + CDC_ACM(4) + CDC_Union(5) + EP3_IN(7) = 35 +
- *   IF2(9) + EP2_OUT(7) + EP2_IN(7) = 23 (CDC Data)
- *   = 9 + 23 + 8 + 35 + 23 = 98
+ *   IAD_UART(8) +
+ *   IF1(9) + CDC_Header(5) + CDC_CallMgmt(5) + CDC_ACM(4) +
+ *     CDC_Union(5) + EP3_IN(7) = 35 +
+ *   IF2(9) + EP2_OUT(7) + EP2_IN(7) = 23 (UART CDC Data) +
+ *   IAD_RTT(8) +
+ *   IF3(9) + CDC_Header(5) + CDC_CallMgmt(5) + CDC_ACM(4) +
+ *     CDC_Union(5) + EP5_IN(7) = 35 +
+ *   IF4(9) + EP4_OUT(7) + EP4_IN(7) = 23 (RTT CDC Data)
+ *   = 9 + 23 + 8 + 35 + 23 + 8 + 35 + 23 = 164
  */
-#define CONFIG_DESC_SIZE    98U
+#define CONFIG_DESC_SIZE    164U
 
 static const uint8_t config_descriptor_data[] = {
   /* Configuration Descriptor. */
-  USB_DESC_CONFIGURATION(CONFIG_DESC_SIZE, 3, 1, 0, 0xC0, 50),
+  USB_DESC_CONFIGURATION(CONFIG_DESC_SIZE, 5, 1, 0, 0xC0, 50),
 
   /* === Interface 0: CMSIS-DAP v2 (Vendor class) === */
   USB_DESC_INTERFACE(0x00, 0x00, 0x02, 0xFF, 0x00, 0x00, 4),
@@ -90,11 +108,11 @@ static const uint8_t config_descriptor_data[] = {
   /* EP1 IN (Bulk). */
   USB_DESC_ENDPOINT(DAP_EP | 0x80, 0x02, 0x0040, 0x00),
 
-  /* === IAD for CDC (interfaces 1-2) === */
+  /* === IAD for UART CDC (interfaces 1-2) === */
   USB_DESC_INTERFACE_ASSOCIATION(0x01, 0x02, 0x02, 0x02, 0x00, 0),
 
-  /* === Interface 1: CDC Control === */
-  USB_DESC_INTERFACE(0x01, 0x00, 0x01, 0x02, 0x02, 0x01, 0),
+  /* === Interface 1: UART CDC Control === */
+  USB_DESC_INTERFACE(0x01, 0x00, 0x01, 0x02, 0x02, 0x01, 6),
   /* CDC Header Functional Descriptor. */
   USB_DESC_BYTE(5), USB_DESC_BYTE(0x24), USB_DESC_BYTE(0x00),
   USB_DESC_BCD(0x0110),
@@ -110,12 +128,39 @@ static const uint8_t config_descriptor_data[] = {
   /* EP3 IN (Interrupt). */
   USB_DESC_ENDPOINT(CDC_INT_EP | 0x80, 0x03, 0x0008, 0xFF),
 
-  /* === Interface 2: CDC Data === */
+  /* === Interface 2: UART CDC Data === */
   USB_DESC_INTERFACE(0x02, 0x00, 0x02, 0x0A, 0x00, 0x00, 0),
   /* EP2 OUT (Bulk). */
   USB_DESC_ENDPOINT(CDC_DATA_EP, 0x02, 0x0040, 0x00),
   /* EP2 IN (Bulk). */
-  USB_DESC_ENDPOINT(CDC_DATA_EP | 0x80, 0x02, 0x0040, 0x00)
+  USB_DESC_ENDPOINT(CDC_DATA_EP | 0x80, 0x02, 0x0040, 0x00),
+
+  /* === IAD for RTT CDC (interfaces 3-4) === */
+  USB_DESC_INTERFACE_ASSOCIATION(0x03, 0x02, 0x02, 0x02, 0x00, 0),
+
+  /* === Interface 3: RTT CDC Control === */
+  USB_DESC_INTERFACE(0x03, 0x00, 0x01, 0x02, 0x02, 0x01, 5),
+  /* CDC Header Functional Descriptor. */
+  USB_DESC_BYTE(5), USB_DESC_BYTE(0x24), USB_DESC_BYTE(0x00),
+  USB_DESC_BCD(0x0110),
+  /* CDC Call Management Functional Descriptor. */
+  USB_DESC_BYTE(5), USB_DESC_BYTE(0x24), USB_DESC_BYTE(0x01),
+  USB_DESC_BYTE(0x00), USB_DESC_BYTE(0x04),
+  /* CDC ACM Functional Descriptor. */
+  USB_DESC_BYTE(4), USB_DESC_BYTE(0x24), USB_DESC_BYTE(0x02),
+  USB_DESC_BYTE(0x02),
+  /* CDC Union Functional Descriptor. */
+  USB_DESC_BYTE(5), USB_DESC_BYTE(0x24), USB_DESC_BYTE(0x06),
+  USB_DESC_BYTE(0x03), USB_DESC_BYTE(0x04),
+  /* EP5 IN (Interrupt). */
+  USB_DESC_ENDPOINT(RTT_INT_EP | 0x80, 0x03, 0x0008, 0xFF),
+
+  /* === Interface 4: RTT CDC Data === */
+  USB_DESC_INTERFACE(0x04, 0x00, 0x02, 0x0A, 0x00, 0x00, 0),
+  /* EP4 OUT (Bulk). */
+  USB_DESC_ENDPOINT(RTT_DATA_EP, 0x02, 0x0040, 0x00),
+  /* EP4 IN (Bulk). */
+  USB_DESC_ENDPOINT(RTT_DATA_EP | 0x80, 0x02, 0x0040, 0x00)
 };
 
 static const USBDescriptor config_descriptor = {
@@ -254,12 +299,28 @@ static const uint8_t string4[] = {
   'P', 0, ' ', 0, 'v', 0, '2', 0
 };
 
+/* String 5: RTT CDC interface name. */
+static const uint8_t string5[] = {
+  USB_DESC_BYTE(24), USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
+  'R', 0, 'T', 0, 'T', 0, ' ', 0, 'C', 0, 'o', 0, 'n', 0, 's', 0,
+  'o', 0, 'l', 0, 'e', 0
+};
+
+/* String 6: UART CDC interface name. */
+static const uint8_t string6[] = {
+  USB_DESC_BYTE(24), USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
+  'U', 0, 'A', 0, 'R', 0, 'T', 0, ' ', 0, 'B', 0, 'r', 0, 'i', 0,
+  'd', 0, 'g', 0, 'e', 0
+};
+
 static const USBDescriptor strings[] = {
   {sizeof string0, string0},
   {sizeof string1, string1},
   {sizeof string2, string2},
   {sizeof string3, string3},
-  {sizeof string4, string4}
+  {sizeof string4, string4},
+  {sizeof string5, string5},
+  {sizeof string6, string6}
 };
 
 void usb_set_serial_string(const char *serial) {
@@ -288,7 +349,7 @@ static const USBDescriptor *get_descriptor(USBDriver *usbp,
   case USB_DESCRIPTOR_CONFIGURATION:
     return &config_descriptor;
   case USB_DESCRIPTOR_STRING:
-    if (dindex < 5U)
+    if (dindex < 7U)
       return &strings[dindex];
     break;
   case 15U:  /* BOS descriptor type */
@@ -316,7 +377,7 @@ static const USBEndpointConfig dap_ep_config = {
   .out_state  = &dap_ep_out_state
 };
 
-/* EP2: CDC data bulk. */
+/* EP2: UART CDC data bulk. */
 static USBInEndpointState  cdc_data_in_state;
 static USBOutEndpointState cdc_data_out_state;
 
@@ -331,7 +392,7 @@ static const USBEndpointConfig cdc_data_ep_config = {
   .out_state  = &cdc_data_out_state
 };
 
-/* EP3: CDC interrupt. */
+/* EP3: UART CDC interrupt. */
 static USBInEndpointState cdc_int_in_state;
 
 static const USBEndpointConfig cdc_int_ep_config = {
@@ -342,6 +403,35 @@ static const USBEndpointConfig cdc_int_ep_config = {
   .in_maxsize = 0x0008,
   .out_maxsize= 0x0000,
   .in_state   = &cdc_int_in_state,
+  .out_state  = NULL
+};
+
+/* EP4: RTT CDC data bulk. */
+static USBInEndpointState  rtt_data_in_state;
+static USBOutEndpointState rtt_data_out_state;
+
+static const USBEndpointConfig rtt_data_ep_config = {
+  .ep_mode    = USB_EP_MODE_TYPE_BULK,
+  .setup_cb   = NULL,
+  .in_cb      = sduDataTransmitted,
+  .out_cb     = sduDataReceived,
+  .in_maxsize = 0x0040,
+  .out_maxsize= 0x0040,
+  .in_state   = &rtt_data_in_state,
+  .out_state  = &rtt_data_out_state
+};
+
+/* EP5: RTT CDC interrupt. */
+static USBInEndpointState rtt_int_in_state;
+
+static const USBEndpointConfig rtt_int_ep_config = {
+  .ep_mode    = USB_EP_MODE_TYPE_INTR,
+  .setup_cb   = NULL,
+  .in_cb      = sduInterruptTransmitted,
+  .out_cb     = NULL,
+  .in_maxsize = 0x0008,
+  .out_maxsize= 0x0000,
+  .in_state   = &rtt_int_in_state,
   .out_state  = NULL
 };
 
@@ -358,7 +448,10 @@ static void usb_event(USBDriver *usbp, usbevent_t event) {
     usbInitEndpointI(usbp, DAP_EP, &dap_ep_config);
     usbInitEndpointI(usbp, CDC_DATA_EP, &cdc_data_ep_config);
     usbInitEndpointI(usbp, CDC_INT_EP, &cdc_int_ep_config);
+    usbInitEndpointI(usbp, RTT_DATA_EP, &rtt_data_ep_config);
+    usbInitEndpointI(usbp, RTT_INT_EP, &rtt_int_ep_config);
     sduConfigureHookI(&SDU1);
+    sduConfigureHookI(&SDU2);
     chEvtBroadcastFlagsI(&evt_usb, EVT_USB_CONFIGURED);
     chSysUnlockFromISR();
     return;
@@ -366,18 +459,21 @@ static void usb_event(USBDriver *usbp, usbevent_t event) {
   case USB_EVENT_UNCONFIGURED:
     chSysLockFromISR();
     sduSuspendHookI(&SDU1);
+    sduSuspendHookI(&SDU2);
     chEvtBroadcastFlagsI(&evt_usb, EVT_USB_RESET);
     chSysUnlockFromISR();
     return;
   case USB_EVENT_SUSPEND:
     chSysLockFromISR();
     sduSuspendHookI(&SDU1);
+    sduSuspendHookI(&SDU2);
     chEvtBroadcastFlagsI(&evt_usb, EVT_USB_SUSPENDED);
     chSysUnlockFromISR();
     return;
   case USB_EVENT_WAKEUP:
     chSysLockFromISR();
     sduWakeupHookI(&SDU1);
+    sduWakeupHookI(&SDU2);
     chEvtBroadcastFlagsI(&evt_usb, EVT_USB_WAKEUP);
     chSysUnlockFromISR();
     return;
@@ -394,6 +490,7 @@ static void sof_handler(USBDriver *usbp) {
   (void)usbp;
   osalSysLockFromISR();
   sduSOFHookI(&SDU1);
+  sduSOFHookI(&SDU2);
   osalSysUnlockFromISR();
 }
 
@@ -416,7 +513,18 @@ static bool requests_hook(USBDriver *usbp) {
     return false;
   }
 
-  /* Delegate CDC requests to Serial USB driver. */
+  /* Track DTR for RTT CDC interface. */
+  if ((usbp->setup[0] & USB_RTYPE_TYPE_MASK) == USB_RTYPE_TYPE_CLASS) {
+    if (usbp->setup[1] == CDC_SET_CONTROL_LINE_STATE) {
+      uint16_t wIndex = (uint16_t)usbp->setup[4] |
+                        ((uint16_t)usbp->setup[5] << 8);
+      if (wIndex == RTT_CDC_IF)
+        rtt_line_state = usbp->setup[2];
+    }
+  }
+
+  /* Delegate CDC requests to Serial USB driver.
+   * sduRequestsHook uses a shared linecoding struct — fine for both CDCs. */
   return sduRequestsHook(usbp);
 }
 
@@ -432,12 +540,21 @@ const USBConfig usbcfg = {
 };
 
 /*===========================================================================*/
-/* Serial over USB driver configuration (CDC on EP2/EP3).                    */
+/* Serial over USB driver configurations.                                    */
 /*===========================================================================*/
 
+/* UART bridge CDC on EP2/EP3. */
 const SerialUSBConfig serusbcfg = {
   .usbp     = &USBD1,
   .bulk_in  = CDC_DATA_EP,
   .bulk_out = CDC_DATA_EP,
   .int_in   = CDC_INT_EP
+};
+
+/* RTT console CDC on EP4/EP5. */
+const SerialUSBConfig rtt_serusbcfg = {
+  .usbp     = &USBD1,
+  .bulk_in  = RTT_DATA_EP,
+  .bulk_out = RTT_DATA_EP,
+  .int_in   = RTT_INT_EP
 };

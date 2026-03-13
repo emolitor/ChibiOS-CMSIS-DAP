@@ -45,6 +45,7 @@
 #include "usbcfg.h"
 #include "dap.h"
 #include "swd.h"
+#include "rtt.h"
 
 /*===========================================================================*/
 /* Configuration.                                                            */
@@ -55,7 +56,7 @@
 #define UART_RX_PIN             5U
 
 #define DAP_THREAD_WA_SIZE      512U
-#define DAP_PROC_THREAD_WA_SIZE 512U
+#define DAP_PROC_THREAD_WA_SIZE 1024U
 #define UART_THREAD_WA_SIZE     512U
 
 /* UART bridge buffer size. */
@@ -284,24 +285,67 @@ static THD_FUNCTION(DapThread, arg) {
 /* DapProcessThread (Core 1) — DAP command processor.                        */
 /*===========================================================================*/
 
+static rtt_state_t rtt;
+
 static THD_WORKING_AREA(waDapProcessThread, DAP_PROC_THREAD_WA_SIZE);
 static THD_FUNCTION(DapProcessThread, arg) {
   (void)arg;
 
   dap_init(&dap_state);
   dap_state.evt_dap = &evt_dap;
+  rtt_init(&rtt);
+
+  systime_t rtt_last_poll = chVTGetSystemTimeX();
 
   while (true) {
+    bool rtt_active = true; /* TODO: fix DTR detection, use rtt_cdc_dtr_active() */
+
     void *objp;
-    if (chFifoReceiveObjectTimeout(&cmd_fifo, &objp,
-                                   TIME_INFINITE) != MSG_OK)
-      continue;
-    dap_packet_t *pkt = (dap_packet_t *)objp;
+    msg_t status = chFifoReceiveObjectTimeout(&cmd_fifo, &objp,
+                                               TIME_MS2I(rtt.poll_interval_ms));
 
-    pkt->resp_len = dap_process_command(&dap_state, pkt->cmd, pkt->resp);
+    if (status == MSG_OK) {
+      /* Process DAP command. */
+      dap_packet_t *pkt = (dap_packet_t *)objp;
+      pkt->resp_len = dap_process_command(&dap_state, pkt->cmd, pkt->resp);
+      chMBPostTimeout(&resp_mbox, (msg_t)pkt, TIME_INFINITE);
+      chEvtSignal(dap_thd, EVT_DAP_RESP_READY);
+    }
+    else if (rtt_active && dap_state.debug_port == DAP_PORT_SWD) {
+      /* RTT poll: only when no DAP commands pending (FIFO timeout).
+       * Must not run between host commands — RTT modifies DP SELECT
+       * which corrupts the host's cached register state. */
+      systime_t now = chVTGetSystemTimeX();
+      if (chVTTimeElapsedSinceX(rtt_last_poll) >=
+          TIME_MS2I(rtt.poll_interval_ms)) {
+        rtt_last_poll = now;
 
-    chMBPostTimeout(&resp_mbox, (msg_t)pkt, TIME_INFINITE);
-    chEvtSignal(dap_thd, EVT_DAP_RESP_READY);
+        static uint8_t rtt_buf[64];
+        uint32_t n = rtt_poll(&rtt, dap_state.debug_port,
+                              dap_state.idle_cycles,
+                              dap_state.turnaround, dap_state.data_phase,
+                              rtt_buf, sizeof(rtt_buf));
+
+        if (n > 0U) {
+          chnWriteTimeout(&SDU2, rtt_buf, (size_t)n, TIME_MS2I(10));
+          if (rtt.poll_interval_ms > RTT_MIN_POLL_MS)
+            rtt.poll_interval_ms /= 2U;
+        }
+        else {
+          if (rtt.found && rtt.poll_interval_ms < RTT_MAX_POLL_MS)
+            rtt.poll_interval_ms *= 2U;
+        }
+
+        /* Check for down-channel data from host. */
+        static uint8_t down_buf[32];
+        size_t dn = chnReadTimeout(&SDU2, down_buf, sizeof(down_buf),
+                                    TIME_IMMEDIATE);
+        if (dn > 0U)
+          rtt_write_down(&rtt, dap_state.idle_cycles,
+                          dap_state.turnaround, dap_state.data_phase,
+                          down_buf, (uint32_t)dn);
+      }
+    }
   }
 }
 
@@ -487,9 +531,11 @@ int main(void) {
   /* Start the RTOS — Core 1 proceeds from chSysWaitSystemState(). */
   chSysInit();
 
-  /* Initialize Serial-over-USB CDC driver (for UART bridge). */
+  /* Initialize Serial-over-USB CDC drivers. */
   sduObjectInit(&SDU1);
   sduStart(&SDU1, &serusbcfg);
+  sduObjectInit(&SDU2);
+  sduStart(&SDU2, &rtt_serusbcfg);
 
   /* Start USB with disconnect/reconnect pattern. */
   usbDisconnectBus(serusbcfg.usbp);

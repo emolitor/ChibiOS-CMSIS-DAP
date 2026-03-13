@@ -240,6 +240,51 @@ RAMFUNC uint8_t swd_transfer(uint32_t request, uint32_t *data,
 }
 
 /**
+ * @brief   Send SWD line reset (56 high clocks + idle).
+ *
+ * Resets the SWD DP state machine.  Does NOT reset register contents
+ * (DPBANKSEL, SELECT, CTRL/STAT are preserved).
+ */
+RAMFUNC void swd_line_reset(void) {
+  /* At least 50 clocks with SWDIO high; we send 56 (7 bytes of 0xFF). */
+  probe_write_bits(32U, 0xFFFFFFFFU);
+  probe_write_bits(24U, 0x00FFFFFFU);
+  /* Idle clocks (SWDIO low). */
+  probe_write_bits(4U, 0U);
+}
+
+/**
+ * @brief   Send TARGETSEL write (DPv3 multidrop, no ACK expected).
+ *
+ * Resets DPBANKSEL to 0 per ADIv6 spec.  Must be preceded by
+ * swd_line_reset().
+ *
+ * @param[in] target_id   TARGETSEL value (TINSTANCE[31:28] | TARGETID[27:0])
+ * @param[in] turnaround  SWD turnaround cycles
+ */
+RAMFUNC void swd_targetsel(uint32_t target_id, uint32_t turnaround) {
+  uint32_t parity;
+
+  /* Request byte: DP Write A[3:2]=11 (TARGETSEL).
+   * Start=1, APnDP=0, RnW=0, A[2]=1, A[3]=1, Parity=0, Stop=0, Park=1
+   * = 0x99 */
+  probe_write_bits(8U, 0x99U);
+
+  /* Turnaround (host → target) + 3-bit ACK (target doesn't drive for
+   * TARGETSEL — pull-up reads 0x7, ignored) + turnaround back. */
+  probe_read_bits(turnaround + 3U);
+  probe_hiz_clocks(turnaround);
+
+  /* 32-bit data + 1-bit parity. */
+  probe_write_bits(32U, target_id);
+  parity = (uint32_t)__builtin_popcount(target_id) & 1U;
+  probe_write_bits(1U, parity);
+
+  /* Idle cycles. */
+  probe_write_bits(8U, 0U);
+}
+
+/**
  * @brief   Output arbitrary bit sequence on SWDIO with SWCLK (SWJ-DP).
  *
  * @param[in] count     number of bits to output

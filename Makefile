@@ -142,7 +142,8 @@ CSRC = $(ALLCSRC) \
        main.c \
        usbcfg.c \
        dap.c \
-       swd.c
+       swd.c \
+       rtt.c
 
 CPPSRC = $(ALLCPPSRC)
 

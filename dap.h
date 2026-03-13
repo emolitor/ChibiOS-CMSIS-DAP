@@ -135,8 +135,8 @@
 /* Capabilities byte.                                                        */
 /*===========================================================================*/
 
-/* Bit 0: SWD supported, others 0 (no JTAG, no SWO, no Atomic, no Timestamp). */
-#define DAP_CAP_SWD             (1U << 0)
+/* Bit 0: SWD, Bit 4: Atomic Commands (ExecuteCommands/QueueCommands). */
+#define DAP_CAP_SWD             ((1U << 0) | (1U << 4))
 
 /*===========================================================================*/
 /* DAP packet for memory pool allocation.                                    */

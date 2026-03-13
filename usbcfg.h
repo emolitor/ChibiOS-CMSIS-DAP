@@ -18,9 +18,10 @@
 /*
  * USB composite device configuration for CMSIS-DAP probe.
  *
- * Two USB functions:
+ * Three USB functions:
  *   1. CMSIS-DAP v2 (Vendor class, Bulk EP1)
  *   2. CDC ACM UART bridge (EP2 data, EP3 interrupt)
+ *   3. CDC ACM RTT console (EP4 data, EP5 interrupt)
  */
 
 #ifndef USBCFG_H
@@ -31,8 +32,16 @@
 /*===========================================================================*/
 
 #define DAP_EP                  1U  /* CMSIS-DAP bulk IN/OUT */
-#define CDC_DATA_EP             2U  /* CDC data bulk IN/OUT */
-#define CDC_INT_EP              3U  /* CDC notification interrupt IN */
+#define CDC_DATA_EP             2U  /* CDC UART data bulk IN/OUT */
+#define CDC_INT_EP              3U  /* CDC UART notification interrupt IN */
+#define RTT_DATA_EP             4U  /* CDC RTT data bulk IN/OUT */
+#define RTT_INT_EP              5U  /* CDC RTT notification interrupt IN */
+
+/*===========================================================================*/
+/* CDC interface numbers.                                                    */
+/*===========================================================================*/
+
+#define RTT_CDC_IF              3U  /* RTT CDC control interface number */
 
 /*===========================================================================*/
 /* MS OS 2.0 vendor request code.                                            */
@@ -57,7 +66,9 @@ extern event_source_t evt_usb;
 
 extern const USBConfig usbcfg;
 extern const SerialUSBConfig serusbcfg;
+extern const SerialUSBConfig rtt_serusbcfg;
 extern SerialUSBDriver SDU1;
+extern SerialUSBDriver SDU2;
 
 /* DAP endpoint callbacks (called from USB ISR). */
 void dap_usb_out_cb(USBDriver *usbp, usbep_t ep);
@@ -65,5 +76,8 @@ void dap_usb_in_cb(USBDriver *usbp, usbep_t ep);
 
 /* Set USB serial number string descriptor from hex string (max 16 chars). */
 void usb_set_serial_string(const char *serial);
+
+/* Check if RTT CDC port has DTR active (terminal connected). */
+bool rtt_cdc_dtr_active(void);
 
 #endif /* USBCFG_H */

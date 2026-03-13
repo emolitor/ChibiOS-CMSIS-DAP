@@ -6,6 +6,7 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 
 - **CMSIS-DAP v2** over USB bulk endpoints (WinUSB — driverless on Windows)
 - **UART bridge** via USB CDC ACM at 115200 baud
+- **RTT (Real-Time Transfer)** via USB CDC — streams SEGGER RTT channel 0 from the target without halting it
 - **Dual-core SMP**: Core 0 handles USB, Core 1 processes DAP commands
 - **PIO-based SWD** Derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe)
 - **Dual-target support**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
@@ -19,19 +20,23 @@ Performance is comparable to the Retail Raspberry Pi Debug Probe.
 
 | Probe | System Clock | PIO Cycles/Bit | Theoretical Max | Tested Max |
 |-------|-------------|-----------------|-----------------|------------|
-| RP2040 | 200 MHz | 4 | 50 MHz | 25 MHz |
+| RP2040 | 200 MHz | 4 | 50 MHz | 28 MHz |
 | RP2350 | 150 MHz | 4 | 37.5 MHz | 25 MHz |
 
 The maximum tested speed is limited by the target's SWD debug port, not the probe's PIO.
 
-### Throughput (64 KB SRAM read via OpenOCD)
+### Throughput (64 KB SRAM read via OpenOCD, 3-run average)
 
-| Probe | SWD Clock | Throughput |
-|-------|-----------|------------|
-| RP2040 | 15 MHz | 526 KB/s |
-| RP2350 | 25 MHz | 526 KB/s |
+| SWD Clock | RP2040 Probe |
+|----------:|-------------:|
+| 1 MHz | 59 KiB/s |
+| 4 MHz | 178 KiB/s |
+| 10 MHz | 285 KiB/s |
+| 15 MHz | 328 KiB/s |
+| 20 MHz | 353 KiB/s |
+| 28 MHz | 375 KiB/s |
 
-Realistic throughput plateaus above ~10 MHz as USB bulk transfer overhead becomes the bottleneck.
+Throughput plateaus above ~15 MHz as USB bulk transfer overhead becomes the bottleneck. RTT adds zero measurable overhead to DAP throughput (all speeds within ±0.3%).
 
 ## Pin Assignment
 
@@ -51,7 +56,8 @@ These match the Raspberry Pi Debug Probe pinout, so any wiring guide for that pr
 - **VID**: `0x2E8A` (Raspberry Pi)
 - **PID**: `0x000C` (Debug Probe)
 - **Interface 0**: CMSIS-DAP v2 (Vendor class, Bulk EP1 IN/OUT)
-- **Interfaces 1-2**: CDC ACM UART bridge (Bulk EP2 IN/OUT, Interrupt EP3 IN)
+- **Interfaces 1-2**: CDC ACM "UART Bridge" (Bulk EP2 IN/OUT, Interrupt EP3 IN)
+- **Interfaces 3-4**: CDC ACM "RTT Console" (Bulk EP4 IN/OUT, Interrupt EP5 IN)
 
 Includes a BOS descriptor with Platform Capability for automatic WinUSB driver binding on Windows.
 

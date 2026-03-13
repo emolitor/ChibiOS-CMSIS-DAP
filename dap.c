@@ -71,14 +71,6 @@ static uint8_t swd_request_byte(uint32_t request) {
 }
 
 /*===========================================================================*/
-/* Delay helper (ChibiOS thread sleep).                                      */
-/*===========================================================================*/
-
-static void delay_ms(uint32_t ms) {
-  chThdSleepMilliseconds(ms);
-}
-
-/*===========================================================================*/
 /* DAP_Info (0x00).                                                          */
 /*===========================================================================*/
 
@@ -155,16 +147,20 @@ static uint32_t dap_host_status(dap_data_t *dap, const uint8_t *req,
   resp[0] = DAP_CMD_HOST_STATUS;
   resp[1] = DAP_OK;
 
-  /* Broadcast LED state change as event flags. */
-  if (dap->evt_dap != NULL) {
-    if (type == 0U) {
+  if (type == 0U) {
+    /* Connected status. */
+    if (dap->evt_dap != NULL)
       chEvtBroadcastFlags(dap->evt_dap,
                           status ? EVT_DAP_CONNECTED : EVT_DAP_DISCONNECTED);
-    }
-    else if (type == 1U) {
+  }
+  else if (type == 1U) {
+    /* Running status. */
+    if (dap->evt_dap != NULL)
       chEvtBroadcastFlags(dap->evt_dap,
                           status ? EVT_DAP_RUNNING : EVT_DAP_IDLE);
-    }
+  }
+  else {
+    resp[1] = DAP_ERROR;
   }
 
   return 2U;
@@ -244,16 +240,36 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
 
   resp[0] = DAP_CMD_TRANSFER;
 
+  dap->abort = 0U;
+
   for (n = 0; n < req_count; n++) {
     request = req[req_idx++];
 
     /* Check for abort. */
-    if (dap->abort) {
-      dap->abort = 0U;
+    if (dap->abort)
       break;
-    }
 
     if (request & DAP_TRANSFER_MATCH_MASK) {
+      /* Flush pending posted AP read before setting match mask. */
+      if (post_read) {
+        for (retry = 0; retry <= dap->retry_count; retry++) {
+          ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
+                             dap->idle_cycles, dap->turnaround,
+                             dap->data_phase);
+          if (ack != SWD_ACK_WAIT || dap->abort)
+            break;
+        }
+        if (ack != SWD_ACK_OK) {
+          transfer_response = ack;
+          break;
+        }
+        resp[resp_idx++] = (uint8_t)(data);
+        resp[resp_idx++] = (uint8_t)(data >> 8);
+        resp[resp_idx++] = (uint8_t)(data >> 16);
+        resp[resp_idx++] = (uint8_t)(data >> 24);
+        post_read = 0U;
+      }
+
       /* Set match mask. */
       dap->match_mask = (uint32_t)req[req_idx] |
                         ((uint32_t)req[req_idx + 1] << 8) |
@@ -262,6 +278,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       req_idx += 4U;
       transfer_response = DAP_OK;
       transfer_count++;
+      check_write = 0U;
       continue;
     }
 
@@ -276,7 +293,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
-            if (ack != SWD_ACK_WAIT)
+            if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
           if (ack != SWD_ACK_OK) {
@@ -299,7 +316,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             ack = swd_transfer(swd_req, NULL, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
-            if (ack != SWD_ACK_WAIT)
+            if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
           if (ack != SWD_ACK_OK) {
@@ -320,7 +337,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             ack = swd_transfer(read_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
-            if (ack != SWD_ACK_WAIT)
+            if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
           if (ack != SWD_ACK_OK) {
@@ -353,7 +370,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
               ack = swd_transfer(swd_req, &data, dap->clk_div,
                                  dap->idle_cycles, dap->turnaround,
                                  dap->data_phase);
-              if (ack != SWD_ACK_WAIT)
+              if (ack != SWD_ACK_WAIT || dap->abort)
                 break;
             }
           }
@@ -363,7 +380,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
               ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                                  dap->idle_cycles, dap->turnaround,
                                  dap->data_phase);
-              if (ack != SWD_ACK_WAIT)
+              if (ack != SWD_ACK_WAIT || dap->abort)
                 break;
             }
             post_read = 0U;
@@ -389,7 +406,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
               ack = swd_transfer(swd_req, &data, dap->clk_div,
                                  dap->idle_cycles, dap->turnaround,
                                  dap->data_phase);
-              if (ack != SWD_ACK_WAIT)
+              if (ack != SWD_ACK_WAIT || dap->abort)
                 break;
             }
             if (ack != SWD_ACK_OK) {
@@ -415,7 +432,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             ack = swd_transfer(swd_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
                                dap->data_phase);
-            if (ack != SWD_ACK_WAIT)
+            if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
           if (ack != SWD_ACK_OK) {
@@ -450,7 +467,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
           ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                              dap->idle_cycles, dap->turnaround,
                              dap->data_phase);
-          if (ack != SWD_ACK_WAIT)
+          if (ack != SWD_ACK_WAIT || dap->abort)
             break;
         }
         if (ack != SWD_ACK_OK) {
@@ -478,7 +495,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
         ack = swd_transfer(swd_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
-        if (ack != SWD_ACK_WAIT)
+        if (ack != SWD_ACK_WAIT || dap->abort)
           break;
       }
       if (ack != SWD_ACK_OK) {
@@ -499,7 +516,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                          dap->idle_cycles, dap->turnaround,
                          dap->data_phase);
-      if (ack != SWD_ACK_WAIT)
+      if (ack != SWD_ACK_WAIT || dap->abort)
         break;
     }
     if (ack == SWD_ACK_OK) {
@@ -518,7 +535,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
                          dap->idle_cycles, dap->turnaround,
                          dap->data_phase);
-      if (ack != SWD_ACK_WAIT)
+      if (ack != SWD_ACK_WAIT || dap->abort)
         break;
     }
     if (ack != SWD_ACK_OK) {
@@ -551,6 +568,8 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
 
   resp[0] = DAP_CMD_TRANSFER_BLOCK;
 
+  dap->abort = 0U;
+
   swd_req = swd_request_byte(request);
 
   if (request & DAP_TRANSFER_RnW) {
@@ -561,7 +580,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
         ack = swd_transfer(swd_req, NULL, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
-        if (ack != SWD_ACK_WAIT)
+        if (ack != SWD_ACK_WAIT || dap->abort)
           break;
       }
       if (ack != SWD_ACK_OK)
@@ -569,10 +588,8 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
     }
 
     for (n = 0; n < count; n++) {
-      if (dap->abort) {
-        dap->abort = 0U;
+      if (dap->abort)
         break;
-      }
 
       uint8_t read_req;
       if ((request & DAP_TRANSFER_APnDP) && (n == count - 1U))
@@ -584,7 +601,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
         ack = swd_transfer(read_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
-        if (ack != SWD_ACK_WAIT)
+        if (ack != SWD_ACK_WAIT || dap->abort)
           break;
       }
       if (ack != SWD_ACK_OK)
@@ -600,10 +617,8 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
   else {
     /* Block write. */
     for (n = 0; n < count; n++) {
-      if (dap->abort) {
-        dap->abort = 0U;
+      if (dap->abort)
         break;
-      }
 
       data = (uint32_t)req[req_idx] |
              ((uint32_t)req[req_idx + 1] << 8) |
@@ -615,7 +630,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
         ack = swd_transfer(swd_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
-        if (ack != SWD_ACK_WAIT)
+        if (ack != SWD_ACK_WAIT || dap->abort)
           break;
       }
       if (ack != SWD_ACK_OK)
@@ -630,7 +645,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
         ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
-        if (ack != SWD_ACK_WAIT)
+        if (ack != SWD_ACK_WAIT || dap->abort)
           break;
       }
     }
@@ -714,9 +729,34 @@ static uint32_t dap_swj_pins(const uint8_t *req, uint8_t *resp) {
     }
   }
 
-  /* Wait for specified time, if any. */
+  /* Busy-poll until selected pins match desired state or timeout. */
   if (wait_us > 0U) {
-    delay_ms((wait_us + 999U) / 1000U);
+    /* Build bitmasks for the GPIO pins we're checking. */
+    uint32_t check_mask = 0U;
+    uint32_t match_val  = 0U;
+    if (pin_select & DAP_SWJ_SWCLK_TCK) {
+      check_mask |= SWCLK_BIT;
+      if (pin_output & DAP_SWJ_SWCLK_TCK)
+        match_val |= SWCLK_BIT;
+    }
+    if (pin_select & DAP_SWJ_SWDIO_TMS) {
+      check_mask |= SWDIO_BIT;
+      if (pin_output & DAP_SWJ_SWDIO_TMS)
+        match_val |= SWDIO_BIT;
+    }
+    if (pin_select & DAP_SWJ_nRESET) {
+      check_mask |= NRESET_BIT;
+      if (pin_output & DAP_SWJ_nRESET)
+        match_val |= NRESET_BIT;
+    }
+
+    rtcnt_t timeout = US2RTC(RP_CLK_SYS_FREQ, wait_us);
+    rtcnt_t start   = chSysGetRealtimeCounterX();
+    do {
+      if ((SIO_GPIO_IN & check_mask) == match_val)
+        break;
+    } while (chSysIsCounterWithinX(chSysGetRealtimeCounterX(),
+                                    start, start + timeout));
   }
 
   /* Read pin state. */
@@ -846,7 +886,7 @@ static uint32_t dap_delay(const uint8_t *req, uint8_t *resp) {
   uint32_t delay = (uint32_t)req[1] | ((uint32_t)req[2] << 8);
 
   resp[0] = DAP_CMD_DELAY;
-  delay_ms(delay);
+  chThdSleepMicroseconds(delay);
   resp[1] = DAP_OK;
   return 2U;
 }
@@ -979,7 +1019,7 @@ void dap_init(dap_data_t *dap) {
   dap->match_retry  = 0U;
   dap->turnaround   = 1U;
   dap->data_phase   = 0U;
-  dap->match_mask   = 0xFFFFFFFFU;
+  dap->match_mask   = 0x00000000U;
 }
 
 uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,

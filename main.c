@@ -298,7 +298,7 @@ static THD_FUNCTION(DapProcessThread, arg) {
   systime_t rtt_last_poll = chVTGetSystemTimeX();
 
   while (true) {
-    bool rtt_active = true; /* TODO: fix DTR detection, use rtt_cdc_dtr_active() */
+    bool rtt_active = rtt_cdc_dtr_active();
 
     void *objp;
     msg_t status = chFifoReceiveObjectTimeout(&cmd_fifo, &objp,

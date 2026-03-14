@@ -35,7 +35,7 @@
 static const char dap_vendor[]      = "ChibiOS";
 static const char dap_product[]     = "ChibiOS Probe (CMSIS-DAP)";
 static char       dap_serial[17]    = "0000000000000000";
-static const char dap_cmsis_ver[]   = "2.1.1";
+static const char dap_cmsis_ver[]   = "2.1.2";
 static const char dap_fw_ver[]      = "1.0.0";
 
 void dap_set_serial(const char *serial) {
@@ -98,9 +98,10 @@ static uint32_t dap_info(const uint8_t *req, uint8_t *resp) {
     str = dap_fw_ver;
     break;
   case DAP_INFO_CAPABILITIES:
-    resp[1] = 1U;  /* length */
+    resp[1] = 2U;  /* length */
     resp[2] = DAP_CAP_SWD;
-    return 3U;
+    resp[3] = (1U << 0);  /* USB COM Port */
+    return 4U;
   case DAP_INFO_TEST_DOMAIN_TIMER:
     resp[1] = 4U;  /* length */
     /* No test domain timer — return 0. */
@@ -249,46 +250,25 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
     if (dap->abort)
       break;
 
-    if (request & DAP_TRANSFER_MATCH_MASK) {
-      /* Flush pending posted AP read before setting match mask. */
-      if (post_read) {
-        for (retry = 0; retry <= dap->retry_count; retry++) {
-          ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
-                             dap->idle_cycles, dap->turnaround,
-                             dap->data_phase);
-          if (ack != SWD_ACK_WAIT || dap->abort)
-            break;
-        }
-        if (ack != SWD_ACK_OK) {
-          transfer_response = ack;
-          break;
-        }
-        resp[resp_idx++] = (uint8_t)(data);
-        resp[resp_idx++] = (uint8_t)(data >> 8);
-        resp[resp_idx++] = (uint8_t)(data >> 16);
-        resp[resp_idx++] = (uint8_t)(data >> 24);
-        post_read = 0U;
-      }
-
-      /* Set match mask. */
-      dap->match_mask = (uint32_t)req[req_idx] |
-                        ((uint32_t)req[req_idx + 1] << 8) |
-                        ((uint32_t)req[req_idx + 2] << 16) |
-                        ((uint32_t)req[req_idx + 3] << 24);
-      req_idx += 4U;
-      transfer_response = DAP_OK;
-      transfer_count++;
-      check_write = 0U;
-      continue;
-    }
-
     swd_req = swd_request_byte(request);
 
     if (request & DAP_TRANSFER_RnW) {
-      /* Read transfer. */
-      if (request & DAP_TRANSFER_MATCH_VALUE) {
-        /* Read with match — flush any pending posted read first. */
-        if (post_read) {
+      /* Read register. */
+      if (post_read) {
+        /* Read was posted before. */
+        if ((request & (DAP_TRANSFER_APnDP | DAP_TRANSFER_MATCH_VALUE))
+            == DAP_TRANSFER_APnDP) {
+          /* Read previous AP data and post next AP read. */
+          for (retry = 0; retry <= dap->retry_count; retry++) {
+            ack = swd_transfer(swd_req, &data, dap->clk_div,
+                               dap->idle_cycles, dap->turnaround,
+                               dap->data_phase);
+            if (ack != SWD_ACK_WAIT || dap->abort)
+              break;
+          }
+        }
+        else {
+          /* Read previous AP data. */
           for (retry = 0; retry <= dap->retry_count; retry++) {
             ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
@@ -296,13 +276,20 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
-          if (ack != SWD_ACK_OK) {
-            transfer_response = ack;
-            break;
-          }
           post_read = 0U;
         }
+        transfer_response = ack;
+        if (ack != SWD_ACK_OK)
+          break;
+        /* Store previous AP data. */
+        resp[resp_idx++] = (uint8_t)(data);
+        resp[resp_idx++] = (uint8_t)(data >> 8);
+        resp[resp_idx++] = (uint8_t)(data >> 16);
+        resp[resp_idx++] = (uint8_t)(data >> 24);
+      }
 
+      if (request & DAP_TRANSFER_MATCH_VALUE) {
+        /* Read with value match. */
         uint32_t match_val = (uint32_t)req[req_idx] |
                              ((uint32_t)req[req_idx + 1] << 8) |
                              ((uint32_t)req[req_idx + 2] << 16) |
@@ -311,7 +298,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
 
         uint32_t match_retry = dap->match_retry;
         if (request & DAP_TRANSFER_APnDP) {
-          /* AP read: issue dummy read to prime pipeline. */
+          /* Post AP read. */
           for (retry = 0; retry <= dap->retry_count; retry++) {
             ack = swd_transfer(swd_req, NULL, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
@@ -319,115 +306,15 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
-          if (ack != SWD_ACK_OK) {
-            transfer_response = ack;
+          transfer_response = ack;
+          if (ack != SWD_ACK_OK)
             break;
-          }
         }
 
-        /* Retry reads until match or timeout. */
+        /* Retry reads until match or timeout.
+         * Uses swd_req (not RDBUFF) so AP reads re-post each
+         * iteration, returning fresh data for polling. */
         do {
-          uint8_t read_req;
-          if (request & DAP_TRANSFER_APnDP)
-            read_req = rdbuff_req;
-          else
-            read_req = swd_req;
-
-          for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(read_req, &data, dap->clk_div,
-                               dap->idle_cycles, dap->turnaround,
-                               dap->data_phase);
-            if (ack != SWD_ACK_WAIT || dap->abort)
-              break;
-          }
-          if (ack != SWD_ACK_OK) {
-            transfer_response = ack;
-            break;
-          }
-        } while (((data & dap->match_mask) != match_val) && match_retry-- && !dap->abort);
-
-        if ((data & dap->match_mask) != match_val) {
-          transfer_response = (uint32_t)ack | (1U << 4); /* MISMATCH flag */
-        }
-        else {
-          transfer_response = ack;
-        }
-        transfer_count++;
-
-        if (transfer_response != DAP_OK)
-          break;
-
-        check_write = 0U;
-      }
-      else {
-        /* Normal read. */
-
-        /* Flush pending posted read before this read if needed. */
-        if (post_read) {
-          if ((request & DAP_TRANSFER_APnDP) && !(request & DAP_TRANSFER_MATCH_VALUE)) {
-            /* Next is also an AP read — pipeline: this read returns prev data. */
-            for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(swd_req, &data, dap->clk_div,
-                                 dap->idle_cycles, dap->turnaround,
-                                 dap->data_phase);
-              if (ack != SWD_ACK_WAIT || dap->abort)
-                break;
-            }
-          }
-          else {
-            /* Not an AP read — flush via RDBUFF. */
-            for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
-                                 dap->idle_cycles, dap->turnaround,
-                                 dap->data_phase);
-              if (ack != SWD_ACK_WAIT || dap->abort)
-                break;
-            }
-            post_read = 0U;
-          }
-          if (ack != SWD_ACK_OK) {
-            transfer_response = ack;
-            transfer_count++;
-            break;
-          }
-
-          /* Store the previous posted read's data. */
-          resp[resp_idx++] = (uint8_t)(data);
-          resp[resp_idx++] = (uint8_t)(data >> 8);
-          resp[resp_idx++] = (uint8_t)(data >> 16);
-          resp[resp_idx++] = (uint8_t)(data >> 24);
-          transfer_response = ack;
-          check_write = 0U;
-
-          /* If we already pipelined via AP read, post_read stays set. */
-          if (!(request & DAP_TRANSFER_APnDP)) {
-            /* DP read: issue and store directly. */
-            for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(swd_req, &data, dap->clk_div,
-                                 dap->idle_cycles, dap->turnaround,
-                                 dap->data_phase);
-              if (ack != SWD_ACK_WAIT || dap->abort)
-                break;
-            }
-            if (ack != SWD_ACK_OK) {
-              transfer_response = ack;
-              transfer_count++;
-              break;
-            }
-            resp[resp_idx++] = (uint8_t)(data);
-            resp[resp_idx++] = (uint8_t)(data >> 8);
-            resp[resp_idx++] = (uint8_t)(data >> 16);
-            resp[resp_idx++] = (uint8_t)(data >> 24);
-            transfer_response = ack;
-            transfer_count++;
-          }
-          else {
-            /* AP read was pipelined, post_read remains 1. */
-            transfer_count++;
-          }
-        }
-        else {
-          /* No pending posted read. */
           for (retry = 0; retry <= dap->retry_count; retry++) {
             ack = swd_transfer(swd_req, &data, dap->clk_div,
                                dap->idle_cycles, dap->turnaround,
@@ -435,34 +322,60 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
             if (ack != SWD_ACK_WAIT || dap->abort)
               break;
           }
-          if (ack != SWD_ACK_OK) {
-            transfer_response = ack;
-            transfer_count++;
+          transfer_response = ack;
+          if (ack != SWD_ACK_OK)
             break;
-          }
+        } while (((data & dap->match_mask) != match_val) && match_retry--
+                 && !dap->abort);
 
+        if ((data & dap->match_mask) != match_val)
+          transfer_response |= (1U << 4); /* MISMATCH flag */
+        if (transfer_response != SWD_ACK_OK)
+          break;
+      }
+      else {
+        /* Normal read. */
+        if (post_read == 0U) {
           if (request & DAP_TRANSFER_APnDP) {
-            /* AP read: this is a dummy read to prime pipeline. */
+            /* Post AP read. */
+            for (retry = 0; retry <= dap->retry_count; retry++) {
+              ack = swd_transfer(swd_req, NULL, dap->clk_div,
+                                 dap->idle_cycles, dap->turnaround,
+                                 dap->data_phase);
+              if (ack != SWD_ACK_WAIT || dap->abort)
+                break;
+            }
+            transfer_response = ack;
+            if (ack != SWD_ACK_OK)
+              break;
             post_read = 1U;
           }
           else {
-            /* DP read: data is immediately available. */
+            /* Read DP register. */
+            for (retry = 0; retry <= dap->retry_count; retry++) {
+              ack = swd_transfer(swd_req, &data, dap->clk_div,
+                                 dap->idle_cycles, dap->turnaround,
+                                 dap->data_phase);
+              if (ack != SWD_ACK_WAIT || dap->abort)
+                break;
+            }
+            transfer_response = ack;
+            if (ack != SWD_ACK_OK)
+              break;
+            /* Store data. */
             resp[resp_idx++] = (uint8_t)(data);
             resp[resp_idx++] = (uint8_t)(data >> 8);
             resp[resp_idx++] = (uint8_t)(data >> 16);
             resp[resp_idx++] = (uint8_t)(data >> 24);
           }
-          transfer_response = ack;
-          transfer_count++;
-          check_write = 0U;
         }
       }
+      check_write = 0U;
     }
     else {
-      /* Write transfer. */
-
-      /* Flush pending posted read before write. */
+      /* Write register. */
       if (post_read) {
+        /* Read previous data. */
         for (retry = 0; retry <= dap->retry_count; retry++) {
           ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                              dap->idle_cycles, dap->turnaround,
@@ -470,76 +383,81 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
           if (ack != SWD_ACK_WAIT || dap->abort)
             break;
         }
-        if (ack != SWD_ACK_OK) {
-          transfer_response = ack;
-          transfer_count++;
+        transfer_response = ack;
+        if (ack != SWD_ACK_OK)
           break;
-        }
-        /* Store the flushed AP read data. */
+        /* Store previous data. */
         resp[resp_idx++] = (uint8_t)(data);
         resp[resp_idx++] = (uint8_t)(data >> 8);
         resp[resp_idx++] = (uint8_t)(data >> 16);
         resp[resp_idx++] = (uint8_t)(data >> 24);
-        transfer_response = ack;
-        transfer_count++;
         post_read = 0U;
       }
 
+      /* Load data. */
       data = (uint32_t)req[req_idx] |
              ((uint32_t)req[req_idx + 1] << 8) |
              ((uint32_t)req[req_idx + 2] << 16) |
              ((uint32_t)req[req_idx + 3] << 24);
       req_idx += 4U;
 
+      if (request & DAP_TRANSFER_MATCH_MASK) {
+        /* Write match mask — no SWD transfer. */
+        dap->match_mask = data;
+      }
+      else {
+        /* Write DP/AP register. */
+        for (retry = 0; retry <= dap->retry_count; retry++) {
+          ack = swd_transfer(swd_req, &data, dap->clk_div,
+                             dap->idle_cycles, dap->turnaround,
+                             dap->data_phase);
+          if (ack != SWD_ACK_WAIT || dap->abort)
+            break;
+        }
+        transfer_response = ack;
+        if (ack != SWD_ACK_OK)
+          break;
+        check_write = 1U;
+      }
+    }
+
+    transfer_count++;
+    if (dap->abort)
+      break;
+  }
+
+  /* End-of-sequence flush or check — only if no error. */
+  if (transfer_response == SWD_ACK_OK) {
+    if (post_read) {
+      /* Read previous data. */
       for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(swd_req, &data, dap->clk_div,
+        ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
                            dap->idle_cycles, dap->turnaround,
                            dap->data_phase);
         if (ack != SWD_ACK_WAIT || dap->abort)
           break;
       }
-      if (ack != SWD_ACK_OK) {
-        transfer_response = ack;
-        transfer_count++;
-        break;
+      if (ack == SWD_ACK_OK) {
+        resp[resp_idx++] = (uint8_t)(data);
+        resp[resp_idx++] = (uint8_t)(data >> 8);
+        resp[resp_idx++] = (uint8_t)(data >> 16);
+        resp[resp_idx++] = (uint8_t)(data >> 24);
       }
-
-      transfer_response = ack;
-      transfer_count++;
-      check_write = 1U;
+      else {
+        transfer_response = ack;
+      }
     }
-  }
-
-  /* Flush any pending posted AP read at end of sequence. */
-  if (post_read) {
-    for (retry = 0; retry <= dap->retry_count; retry++) {
-      ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
-                         dap->idle_cycles, dap->turnaround,
-                         dap->data_phase);
-      if (ack != SWD_ACK_WAIT || dap->abort)
-        break;
-    }
-    if (ack == SWD_ACK_OK) {
-      resp[resp_idx++] = (uint8_t)(data);
-      resp[resp_idx++] = (uint8_t)(data >> 8);
-      resp[resp_idx++] = (uint8_t)(data >> 16);
-      resp[resp_idx++] = (uint8_t)(data >> 24);
-    }
-    else {
-      transfer_response = ack;
-    }
-  }
-  else if (check_write) {
-    /* Verify last write didn't cause a fault. */
-    for (retry = 0; retry <= dap->retry_count; retry++) {
-      ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
-                         dap->idle_cycles, dap->turnaround,
-                         dap->data_phase);
-      if (ack != SWD_ACK_WAIT || dap->abort)
-        break;
-    }
-    if (ack != SWD_ACK_OK) {
-      transfer_response = ack;
+    else if (check_write) {
+      /* Verify last write didn't cause a fault. */
+      for (retry = 0; retry <= dap->retry_count; retry++) {
+        ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
+                           dap->idle_cycles, dap->turnaround,
+                           dap->data_phase);
+        if (ack != SWD_ACK_WAIT || dap->abort)
+          break;
+      }
+      if (ack != SWD_ACK_OK)
+        transfer_response = ack;
     }
   }
 
@@ -569,6 +487,9 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
   resp[0] = DAP_CMD_TRANSFER_BLOCK;
 
   dap->abort = 0U;
+
+  if (count == 0U)
+    goto block_done;
 
   swd_req = swd_request_byte(request);
 
@@ -1103,8 +1024,7 @@ uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
     return 2U;
 
   default:
-    response[0] = cmd;
-    response[1] = DAP_ERROR;
-    return 2U;
+    response[0] = DAP_ERROR;
+    return 1U;
   }
 }

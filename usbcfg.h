@@ -66,4 +66,9 @@ void dap_usb_in_cb(USBDriver *usbp, usbep_t ep);
 /* Set USB serial number string descriptor from hex string (max 16 chars). */
 void usb_set_serial_string(const char *serial);
 
+/* CDC line coding / DTR accessors (called from UartThread). */
+bool usb_linecoding_changed(void);
+void usb_get_linecoding(cdc_linecoding_t *lc);
+bool usb_dtr_active(void);
+
 #endif /* USBCFG_H */

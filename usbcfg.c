@@ -398,6 +398,25 @@ static void sof_handler(USBDriver *usbp) {
 }
 
 /*===========================================================================*/
+/* CDC line coding / control line state interception.                         */
+/*===========================================================================*/
+
+static cdc_linecoding_t uart_linecoding = {
+  {0x00, 0xC2, 0x01, 0x00},  /* 115200 baud (little-endian) */
+  LC_STOP_1, LC_PARITY_NONE, 8
+};
+
+static volatile bool uart_dtr;
+static volatile bool uart_linecoding_changed;
+
+static void set_linecoding_cb(USBDriver *usbp) {
+  (void)usbp;
+
+  if (uart_dtr)
+    uart_linecoding_changed = true;
+}
+
+/*===========================================================================*/
 /* Requests hook — handles MS OS 2.0 vendor requests + CDC.                  */
 /*===========================================================================*/
 
@@ -416,8 +435,53 @@ static bool requests_hook(USBDriver *usbp) {
     return false;
   }
 
-  /* Delegate CDC requests to Serial USB driver. */
+  /* Intercept CDC class requests. */
+  if ((usbp->setup[0] & USB_RTYPE_TYPE_MASK) == USB_RTYPE_TYPE_CLASS) {
+    switch (usbp->setup[1]) {
+    case CDC_SET_LINE_CODING:
+      usbSetupTransfer(usbp, (uint8_t *)&uart_linecoding,
+                        sizeof(uart_linecoding), set_linecoding_cb);
+      return true;
+    case CDC_GET_LINE_CODING:
+      usbSetupTransfer(usbp, (uint8_t *)&uart_linecoding,
+                        sizeof(uart_linecoding), NULL);
+      return true;
+    case CDC_SET_CONTROL_LINE_STATE: {
+      uint16_t wValue = (uint16_t)usbp->setup[2] |
+                        ((uint16_t)usbp->setup[3] << 8);
+      uart_dtr = (wValue & 1U) != 0U;
+      usbSetupTransfer(usbp, NULL, 0, NULL);
+      return true;
+    }
+    default:
+      break;
+    }
+  }
+
+  /* Delegate remaining requests to Serial USB driver. */
   return sduRequestsHook(usbp);
+}
+
+/*===========================================================================*/
+/* CDC line coding / DTR accessors for UartThread.                           */
+/*===========================================================================*/
+
+bool usb_linecoding_changed(void) {
+  chSysLock();
+  bool changed = uart_linecoding_changed;
+  uart_linecoding_changed = false;
+  chSysUnlock();
+  return changed;
+}
+
+void usb_get_linecoding(cdc_linecoding_t *lc) {
+  chSysLock();
+  *lc = uart_linecoding;
+  chSysUnlock();
+}
+
+bool usb_dtr_active(void) {
+  return uart_dtr;
 }
 
 /*===========================================================================*/

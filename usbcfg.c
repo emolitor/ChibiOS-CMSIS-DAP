@@ -412,8 +412,7 @@ static volatile bool uart_linecoding_changed;
 static void set_linecoding_cb(USBDriver *usbp) {
   (void)usbp;
 
-  if (uart_dtr)
-    uart_linecoding_changed = true;
+  uart_linecoding_changed = true;
 }
 
 /*===========================================================================*/

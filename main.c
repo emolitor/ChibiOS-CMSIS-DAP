@@ -346,6 +346,16 @@ static output_queue_t uart_tx_oq;
  */
 static void uart_tx_notify(io_queue_t *qp) {
   (void)qp;
+
+  /* Prime the TX FIFO: PL011 TX interrupt is transition-based and
+     won't fire on an initially-empty FIFO. Dequeue bytes directly
+     into the FIFO so the interrupt triggers when the level drops. */
+  while (!sioIsTXFullX(&SIOD1)) {
+    msg_t b = oqGetI(&uart_tx_oq);
+    if (b < MSG_OK)
+      return;
+    sioPutX(&SIOD1, (uint8_t)b);
+  }
   sioSetEnableFlagsX(&SIOD1, SIO_EV_TXNOTFULL);
 }
 
@@ -353,7 +363,10 @@ static void uart_tx_notify(io_queue_t *qp) {
  * @brief   SIO event callback — drains/fills FIFOs via I/O queues.
  * @note    Called from ISR context by sio_lld_serve_interrupt.
  */
+volatile uint32_t uart_cb_count;
+
 static void uart_sio_cb(SIODriver *siop) {
+  uart_cb_count++;
   osalSysLockFromISR();
 
   /* Drain RX FIFO into input queue. */
@@ -420,7 +433,7 @@ static void uart_apply_linecoding(const cdc_linecoding_t *lc) {
   uart_bridge_config.baud = baud;
   uart_bridge_config.UARTLCR_H = lcr_h;
   sioStart(&SIOD1, &uart_bridge_config);
-  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY);
+  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY | SIO_EV_RXIDLE);
 }
 
 /*===========================================================================*/
@@ -445,22 +458,12 @@ static THD_FUNCTION(UartThread, arg) {
     chEvtGetAndClearFlags(&el);
     chEvtGetAndClearFlags(&el_sdu);
 
-    /* DTR deasserted — stop SIO. */
-    if (uart_active && !usb_dtr_active()) {
-      sioStop(&SIOD1);
-      uart_active = false;
-    }
-
-    /* SET_LINE_CODING received while DTR active — start/reconfigure SIO. */
+    /* Reconfigure if line coding changed. */
     if (usb_linecoding_changed()) {
       cdc_linecoding_t lc;
       usb_get_linecoding(&lc);
       uart_apply_linecoding(&lc);
-      uart_active = true;
     }
-
-    if (!uart_active)
-      continue;
 
     /* UART → USB: drain input queue into SDU1. */
     size_t n = iqReadTimeout(&uart_rx_iq, buf, sizeof(buf), TIME_IMMEDIATE);
@@ -545,10 +548,12 @@ int main(void) {
   usbStart(serusbcfg.usbp, &usbcfg);
   usbConnectBus(serusbcfg.usbp);
 
-  /* Configure UART1 pins and set SIO callback (SIO started by UartThread). */
+  /* Configure UART1 pins and start SIO. */
   palSetPadMode(IOPORT1, UART_TX_PIN, PAL_MODE_ALTERNATE_UART);
   palSetPadMode(IOPORT1, UART_RX_PIN, PAL_MODE_ALTERNATE_UART);
+  sioStart(&SIOD1, &uart_bridge_config);
   SIOD1.cb = uart_sio_cb;
+  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY | SIO_EV_RXIDLE);
 
   /* Configure LED pin. */
   palSetLineMode(LED_PIN, PAL_MODE_OUTPUT_PUSHPULL);

@@ -55,7 +55,7 @@
 #define UART_RX_PIN             5U
 
 #define DAP_THREAD_WA_SIZE      512U
-#define DAP_PROC_THREAD_WA_SIZE 512U
+#define DAP_PROC_THREAD_WA_SIZE 1024U
 #define UART_THREAD_WA_SIZE     512U
 
 /* UART bridge buffer size. */
@@ -63,20 +63,6 @@
 
 /* UART I/O queue size. */
 #define UART_QUEUE_SIZE         256U
-
-/*===========================================================================*/
-/* Core 1 wait loop (RAMFUNC — runs from RAM).                               */
-/*===========================================================================*/
-
-/**
- * @brief   Core 1 wait loop — stays in RAM while Core 0 reads flash.
- * @note    RAMFUNC — runs from RAM.
- */
-RAMFUNC static void c1_wait_for_init(volatile uint32_t *flag) {
-  while (*flag == 0U) {
-    __WFE();
-  }
-}
 
 /*===========================================================================*/
 /* Hex conversion helper.                                                    */
@@ -95,11 +81,22 @@ static void uid_to_hex(const uint8_t *uid, char *hex, uint32_t len) {
 }
 
 /*===========================================================================*/
-/* Boot handshake flags for flash ID reading.                                */
+/* Early flash unique ID read (runs before main, before Core 1 starts).      */
 /*===========================================================================*/
 
-static volatile uint32_t c1_in_ram    = 0U;
-static volatile uint32_t init_complete = 0U;
+/**
+ * @brief   CRT0 late init hook — runs after BSS/DATA init, before main().
+ */
+void __late_init(void) {
+  uint8_t uid[8];
+  char serial_hex[17];
+
+  efl_lld_read_unique_id(&EFLD1, uid);
+  uid_to_hex(uid, serial_hex, 8U);
+
+  dap_set_serial(serial_hex);
+  usb_set_serial_string(serial_hex);
+}
 
 /*===========================================================================*/
 /* Event sources.                                                            */
@@ -132,6 +129,7 @@ static dap_data_t dap_state;
 
 static thread_t *dap_thd;
 static volatile uint32_t dap_rx_len;
+static uint32_t inflight;
 
 /* Thread event masks for DapThread. */
 #define EVT_DAP_RX_DONE         EVENT_MASK(0)
@@ -238,7 +236,27 @@ static THD_FUNCTION(DapThread, arg) {
             tx_pkt = NULL;
           }
 
-          /* Send abort response directly. */
+          /* Drain all in-flight responses before sending abort response.
+           * Host expects responses in order: aborted command(s) first,
+           * then abort response last. */
+          while (inflight > 0U && USBD1.state == USB_ACTIVE) {
+            msg_t msg;
+            if (chMBFetchTimeout(&resp_mbox, &msg,
+                                 TIME_MS2I(200)) == MSG_OK) {
+              dap_packet_t *pkt = (dap_packet_t *)msg;
+              inflight--;
+              chSysLock();
+              usbStartTransmitI(&USBD1, DAP_EP, pkt->resp, pkt->resp_len);
+              chSysUnlock();
+              chEvtWaitAny(EVT_DAP_TX_DONE);
+              chFifoReturnObject(&cmd_fifo, pkt);
+            }
+            else {
+              break;
+            }
+          }
+
+          /* Send abort response last. */
           rx_pkt->resp[0] = DAP_CMD_TRANSFER_ABORT;
           rx_pkt->resp[1] = DAP_OK;
           chSysLock();
@@ -249,6 +267,7 @@ static THD_FUNCTION(DapThread, arg) {
         else {
           /* Send command to Core 1 via object FIFO. */
           chFifoSendObject(&cmd_fifo, rx_pkt);
+          inflight++;
         }
 
         /* Allocate next RX buffer and re-arm USB OUT. */
@@ -263,6 +282,7 @@ static THD_FUNCTION(DapThread, arg) {
         msg_t msg;
         if (chMBFetchTimeout(&resp_mbox, &msg, TIME_IMMEDIATE) == MSG_OK) {
           dap_packet_t *pkt = (dap_packet_t *)msg;
+          inflight--;
           chSysLock();
           usbStartTransmitI(&USBD1, DAP_EP, pkt->resp, pkt->resp_len);
           chSysUnlock();
@@ -271,7 +291,13 @@ static THD_FUNCTION(DapThread, arg) {
       }
     }
 
-    /* USB disconnected — return buffers to pool. */
+    /* USB disconnected — drain any leaked responses and return buffers. */
+    {
+      msg_t msg;
+      while (chMBFetchTimeout(&resp_mbox, &msg, TIME_IMMEDIATE) == MSG_OK)
+        chFifoReturnObject(&cmd_fifo, (dap_packet_t *)msg);
+      inflight = 0U;
+    }
     chFifoReturnObject(&cmd_fifo, rx_pkt);
     if (tx_pkt != NULL) {
       chFifoReturnObject(&cmd_fifo, tx_pkt);
@@ -378,9 +404,14 @@ static THD_FUNCTION(UartThread, arg) {
   event_listener_t el;
   chEvtRegisterMask(&evt_uart, &el, EVENT_MASK(0));
 
+  event_listener_t el_sdu;
+  chEvtRegisterMaskWithFlags(chnGetEventSource(&SDU1), &el_sdu,
+                             EVENT_MASK(1), CHN_INPUT_AVAILABLE);
+
   while (true) {
-    chEvtWaitAnyTimeout(EVENT_MASK(0), TIME_MS2I(10));
+    chEvtWaitAnyTimeout(EVENT_MASK(0) | EVENT_MASK(1), TIME_MS2I(10));
     chEvtGetAndClearFlags(&el);
+    chEvtGetAndClearFlags(&el_sdu);
 
     /* UART → USB: drain input queue into SDU1. */
     size_t n = iqReadTimeout(&uart_rx_iq, buf, sizeof(buf), TIME_IMMEDIATE);
@@ -399,14 +430,6 @@ static THD_FUNCTION(UartThread, arg) {
 /*===========================================================================*/
 
 void c1_main(void) {
-  /* Signal Core 0 that we're in RAM. */
-  c1_in_ram = 1U;
-  __DSB();
-  __SEV();
-
-  /* Wait in RAM while Core 0 reads flash unique ID. */
-  c1_wait_for_init(&init_complete);
-
   /* Proceed with ChibiOS SMP initialization. */
   chSysWaitSystemState(ch_sys_running);
   chInstanceObjectInit(&ch1, &ch_core1_cfg);
@@ -427,31 +450,7 @@ void c1_main(void) {
 /*===========================================================================*/
 
 int main(void) {
-  uint8_t uid[8];
-  char serial_hex[17];
-
-  /*
-   * halInit() launches Core 1 via start_core1() in hal_lld_init().
-   * Core 1 enters c1_main(), signals c1_in_ram, then waits in
-   * c1_wait_for_init (RAMFUNC) while we read the flash unique ID.
-   */
   halInit();
-
-  /* Wait for Core 1 to be safely in RAM before disabling XIP. */
-  while (!c1_in_ram) { }
-  __DSB();
-
-  /* Read flash unique ID while Core 1 is safely in RAM. */
-  efl_lld_read_unique_id(&EFLD1, uid);
-  uid_to_hex(uid, serial_hex, 8U);
-
-  dap_set_serial(serial_hex);
-  usb_set_serial_string(serial_hex);
-
-  /* Signal Core 1 that flash reading is complete. */
-  init_complete = 1U;
-  __DSB();
-  __SEV();
 
   /*
    * Initialize all shared kernel objects before chSysInit().

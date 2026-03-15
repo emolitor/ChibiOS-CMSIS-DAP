@@ -65,9 +65,9 @@
 #define DAP_CMD_SWO_DATA                0x1CU
 #define DAP_CMD_UART_TRANSPORT          0x1FU
 #define DAP_CMD_UART_CONFIGURE          0x20U
-#define DAP_CMD_UART_CONTROL            0x21U
-#define DAP_CMD_UART_STATUS             0x22U
-#define DAP_CMD_UART_TRANSFER           0x23U
+#define DAP_CMD_UART_TRANSFER           0x21U
+#define DAP_CMD_UART_CONTROL            0x22U
+#define DAP_CMD_UART_STATUS             0x23U
 
 #define DAP_CMD_QUEUE_COMMANDS          0x7EU
 #define DAP_CMD_EXECUTE_COMMANDS        0x7FU
@@ -135,8 +135,8 @@
 /* Capabilities byte.                                                        */
 /*===========================================================================*/
 
-/* Bit 0: SWD supported, others 0 (no JTAG, no SWO, no Atomic, no Timestamp). */
-#define DAP_CAP_SWD             (1U << 0)
+/* Bit 0: SWD, Bit 4: Atomic Commands (ExecuteCommands/QueueCommands). */
+#define DAP_CAP_SWD             ((1U << 0) | (1U << 4))
 
 /*===========================================================================*/
 /* DAP packet for memory pool allocation.                                    */

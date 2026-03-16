@@ -380,31 +380,10 @@ static THD_FUNCTION(DapProcessThread, arg) {
 /*===========================================================================*/
 
 static uint8_t uart_rx_qbuf[UART_QUEUE_SIZE];
-static uint8_t uart_tx_qbuf[UART_QUEUE_SIZE];
 static input_queue_t uart_rx_iq;
-static output_queue_t uart_tx_oq;
 
 /**
- * @brief   Output queue notify — data enqueued, enable SIO TX interrupt.
- * @note    Called from locked thread context.
- */
-static void uart_tx_notify(io_queue_t *qp) {
-  (void)qp;
-
-  /* Prime the TX FIFO: PL011 TX interrupt is transition-based and
-     won't fire on an initially-empty FIFO. Dequeue bytes directly
-     into the FIFO so the interrupt triggers when the level drops. */
-  while (!sioIsTXFullX(&SIOD1)) {
-    msg_t b = oqGetI(&uart_tx_oq);
-    if (b < MSG_OK)
-      return;
-    sioPutX(&SIOD1, (uint8_t)b);
-  }
-  sioSetEnableFlagsX(&SIOD1, SIO_EV_TXNOTFULL);
-}
-
-/**
- * @brief   SIO event callback — drains/fills FIFOs via I/O queues.
+ * @brief   SIO event callback — drains RX FIFO into input queue.
  * @note    Called from ISR context by sio_lld_serve_interrupt.
  */
 volatile uint32_t uart_cb_count;
@@ -413,26 +392,11 @@ static void uart_sio_cb(SIODriver *siop) {
   uart_cb_count++;
   osalSysLockFromISR();
 
-  /* Drain RX FIFO into input queue. */
-  bool got_rx = false;
   while (!sioIsRXEmptyX(siop)) {
     msg_t b = sioGetX(siop);
     iqPutI(&uart_rx_iq, (uint8_t)b);
-    got_rx = true;
   }
-  if (got_rx)
-    chEvtBroadcastFlagsI(&evt_uart, 1U);
-
-  /* Fill TX FIFO from output queue. */
-  while (!sioIsTXFullX(siop)) {
-    msg_t b = oqGetI(&uart_tx_oq);
-    if (b < MSG_OK) {
-      /* Queue empty — disable TX interrupt. */
-      sioClearEnableFlagsX(siop, SIO_EV_TXNOTFULL);
-      break;
-    }
-    sioPutX(siop, (uint8_t)b);
-  }
+  chEvtBroadcastFlagsI(&evt_uart, 1U);
 
   osalSysUnlockFromISR();
 }
@@ -514,10 +478,16 @@ static THD_FUNCTION(UartThread, arg) {
     if (n > 0U)
       chnWriteTimeout(&SDU1, buf, n, TIME_MS2I(100));
 
-    /* USB → UART: read SDU1 into output queue. */
+    /* USB → UART: read SDU1 and write directly to SIO TX FIFO. */
     n = chnReadTimeout(&SDU1, buf, sizeof(buf), TIME_IMMEDIATE);
-    if (n > 0U)
-      oqWriteTimeout(&uart_tx_oq, buf, n, TIME_MS2I(100));
+    while (n > 0U) {
+      size_t written = sioAsyncWrite(&SIOD1, buf, n);
+      n -= written;
+      if (n > 0U) {
+        memmove(buf, buf + written, n);
+        chThdSleepMilliseconds(1);
+      }
+    }
   }
 }
 
@@ -574,10 +544,8 @@ int main(void) {
   /* Virtual timer for LED blink. */
   chVTObjectInit(&led_vt);
 
-  /* I/O queues for UART bridge. */
+  /* Input queue for UART bridge RX. */
   iqObjectInit(&uart_rx_iq, uart_rx_qbuf, UART_QUEUE_SIZE, NULL, NULL);
-  oqObjectInit(&uart_tx_oq, uart_tx_qbuf, UART_QUEUE_SIZE,
-               uart_tx_notify, NULL);
 
   /* Start the RTOS — Core 1 proceeds from chSysWaitSystemState(). */
   chSysInit();

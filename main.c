@@ -390,6 +390,16 @@ static output_queue_t uart_tx_oq;
  */
 static void uart_tx_notify(io_queue_t *qp) {
   (void)qp;
+
+  /* Prime the TX FIFO: PL011 TX interrupt is transition-based and
+     won't fire on an initially-empty FIFO. Dequeue bytes directly
+     into the FIFO so the interrupt triggers when the level drops. */
+  while (!sioIsTXFullX(&SIOD1)) {
+    msg_t b = oqGetI(&uart_tx_oq);
+    if (b < MSG_OK)
+      return;
+    sioPutX(&SIOD1, (uint8_t)b);
+  }
   sioSetEnableFlagsX(&SIOD1, SIO_EV_TXNOTFULL);
 }
 
@@ -397,7 +407,10 @@ static void uart_tx_notify(io_queue_t *qp) {
  * @brief   SIO event callback — drains/fills FIFOs via I/O queues.
  * @note    Called from ISR context by sio_lld_serve_interrupt.
  */
+volatile uint32_t uart_cb_count;
+
 static void uart_sio_cb(SIODriver *siop) {
+  uart_cb_count++;
   osalSysLockFromISR();
 
   /* Drain RX FIFO into input queue. */
@@ -428,13 +441,44 @@ static void uart_sio_cb(SIODriver *siop) {
 /* UART1 configuration for bridge.                                           */
 /*===========================================================================*/
 
-static const SIOConfig uart_bridge_config = {
+static SIOConfig uart_bridge_config = {
   .baud      = 115200,
   .UARTLCR_H = UART_UARTLCR_H_WLEN_8BITS | UART_UARTLCR_H_FEN,
   .UARTCR    = 0,
   .UARTIFLS  = UART_UARTIFLS_RXIFLSEL_1_8F | UART_UARTIFLS_TXIFLSEL_1_8E,
   .UARTDMACR = 0
 };
+
+static void uart_apply_linecoding(const cdc_linecoding_t *lc) {
+  uint32_t baud = (uint32_t)lc->dwDTERate[0]       |
+                  ((uint32_t)lc->dwDTERate[1] << 8) |
+                  ((uint32_t)lc->dwDTERate[2] << 16)|
+                  ((uint32_t)lc->dwDTERate[3] << 24);
+  if (baud == 0U)
+    return;
+
+  uint32_t lcr_h = UART_UARTLCR_H_FEN;
+
+  switch (lc->bDataBits) {
+  case 5:  lcr_h |= UART_UARTLCR_H_WLEN_5BITS; break;
+  case 6:  lcr_h |= UART_UARTLCR_H_WLEN_6BITS; break;
+  case 7:  lcr_h |= UART_UARTLCR_H_WLEN_7BITS; break;
+  default: lcr_h |= UART_UARTLCR_H_WLEN_8BITS; break;
+  }
+
+  if (lc->bCharFormat == LC_STOP_2)
+    lcr_h |= UART_UARTLCR_H_STP2;
+
+  if (lc->bParityType == LC_PARITY_ODD)
+    lcr_h |= UART_UARTLCR_H_PEN;
+  else if (lc->bParityType == LC_PARITY_EVEN)
+    lcr_h |= UART_UARTLCR_H_PEN | UART_UARTLCR_H_EPS;
+
+  uart_bridge_config.baud = baud;
+  uart_bridge_config.UARTLCR_H = lcr_h;
+  sioStart(&SIOD1, &uart_bridge_config);
+  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY | SIO_EV_RXIDLE);
+}
 
 /*===========================================================================*/
 /* UartThread (Core 0) — I/O queue UART bridge.                              */
@@ -444,6 +488,7 @@ static THD_WORKING_AREA(waUartThread, UART_THREAD_WA_SIZE);
 static THD_FUNCTION(UartThread, arg) {
   (void)arg;
   uint8_t buf[UART_BRIDGE_BUF_SIZE];
+  bool uart_active = false;
 
   event_listener_t el;
   chEvtRegisterMask(&evt_uart, &el, EVENT_MASK(0));
@@ -456,6 +501,13 @@ static THD_FUNCTION(UartThread, arg) {
     chEvtWaitAnyTimeout(EVENT_MASK(0) | EVENT_MASK(1), TIME_MS2I(10));
     chEvtGetAndClearFlags(&el);
     chEvtGetAndClearFlags(&el_sdu);
+
+    /* Reconfigure if line coding changed. */
+    if (usb_linecoding_changed()) {
+      cdc_linecoding_t lc;
+      usb_get_linecoding(&lc);
+      uart_apply_linecoding(&lc);
+    }
 
     /* UART → USB: drain input queue into SDU1. */
     size_t n = iqReadTimeout(&uart_rx_iq, buf, sizeof(buf), TIME_IMMEDIATE);
@@ -542,12 +594,12 @@ int main(void) {
   usbStart(serusbcfg.usbp, &usbcfg);
   usbConnectBus(serusbcfg.usbp);
 
-  /* Configure UART1 pins and start SIO with callback. */
+  /* Configure UART1 pins and start SIO. */
   palSetPadMode(IOPORT1, UART_TX_PIN, PAL_MODE_ALTERNATE_UART);
   palSetPadMode(IOPORT1, UART_RX_PIN, PAL_MODE_ALTERNATE_UART);
   sioStart(&SIOD1, &uart_bridge_config);
   SIOD1.cb = uart_sio_cb;
-  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY);
+  sioWriteEnableFlags(&SIOD1, SIO_EV_RXNOTEMPY | SIO_EV_RXIDLE);
 
   /* Configure LED pin. */
   palSetLineMode(LED_PIN, PAL_MODE_OUTPUT_PUSHPULL);

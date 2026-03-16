@@ -80,4 +80,9 @@ void usb_set_serial_string(const char *serial);
 /* Check if RTT CDC port has DTR active (terminal connected). */
 bool rtt_cdc_dtr_active(void);
 
+/* CDC line coding / DTR accessors (called from UartThread). */
+bool usb_linecoding_changed(void);
+void usb_get_linecoding(cdc_linecoding_t *lc);
+bool usb_dtr_active(void);
+
 #endif /* USBCFG_H */

@@ -71,6 +71,32 @@ static uint8_t swd_request_byte(uint32_t request) {
 }
 
 /*===========================================================================*/
+/* Helper: LE32 load/store and SWD retry with WAIT handling.                 */
+/*===========================================================================*/
+
+static inline uint32_t get_le32(const uint8_t *p) {
+  uint32_t v;
+  memcpy(&v, p, sizeof(v));
+  return v;
+}
+
+static inline void put_le32(uint8_t *p, uint32_t v) {
+  memcpy(p, &v, sizeof(v));
+}
+
+static uint8_t swd_retry(dap_data_t *dap, uint8_t req, uint32_t *data) {
+  uint8_t ack;
+
+  for (uint32_t r = 0; r <= dap->retry_count; r++) {
+    ack = swd_transfer(req, data, dap->idle_cycles,
+                       dap->turnaround, dap->data_phase);
+    if (ack != SWD_ACK_WAIT || dap->abort)
+      break;
+  }
+  return ack;
+}
+
+/*===========================================================================*/
 /* DAP_Info (0x00).                                                          */
 /*===========================================================================*/
 
@@ -234,7 +260,6 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
   uint32_t request;
   uint32_t data;
   uint8_t  ack;
-  uint32_t retry;
   uint32_t n;
   uint8_t  swd_req;
   uint8_t  rdbuff_req = swd_request_byte(DAP_TRANSFER_RnW | (0x03U << 2));
@@ -259,53 +284,30 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
         if ((request & (DAP_TRANSFER_APnDP | DAP_TRANSFER_MATCH_VALUE))
             == DAP_TRANSFER_APnDP) {
           /* Read previous AP data and post next AP read. */
-          for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(swd_req, &data, dap->clk_div,
-                               dap->idle_cycles, dap->turnaround,
-                               dap->data_phase);
-            if (ack != SWD_ACK_WAIT || dap->abort)
-              break;
-          }
+          ack = swd_retry(dap, swd_req, &data);
         }
         else {
           /* Read previous AP data. */
-          for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
-                               dap->idle_cycles, dap->turnaround,
-                               dap->data_phase);
-            if (ack != SWD_ACK_WAIT || dap->abort)
-              break;
-          }
+          ack = swd_retry(dap, rdbuff_req, &data);
           post_read = 0U;
         }
         transfer_response = ack;
         if (ack != SWD_ACK_OK)
           break;
         /* Store previous AP data. */
-        resp[resp_idx++] = (uint8_t)(data);
-        resp[resp_idx++] = (uint8_t)(data >> 8);
-        resp[resp_idx++] = (uint8_t)(data >> 16);
-        resp[resp_idx++] = (uint8_t)(data >> 24);
+        put_le32(&resp[resp_idx], data);
+        resp_idx += 4U;
       }
 
       if (request & DAP_TRANSFER_MATCH_VALUE) {
         /* Read with value match. */
-        uint32_t match_val = (uint32_t)req[req_idx] |
-                             ((uint32_t)req[req_idx + 1] << 8) |
-                             ((uint32_t)req[req_idx + 2] << 16) |
-                             ((uint32_t)req[req_idx + 3] << 24);
+        uint32_t match_val = get_le32(&req[req_idx]);
         req_idx += 4U;
 
         uint32_t match_retry = dap->match_retry;
         if (request & DAP_TRANSFER_APnDP) {
           /* Post AP read. */
-          for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(swd_req, NULL, dap->clk_div,
-                               dap->idle_cycles, dap->turnaround,
-                               dap->data_phase);
-            if (ack != SWD_ACK_WAIT || dap->abort)
-              break;
-          }
+          ack = swd_retry(dap, swd_req, NULL);
           transfer_response = ack;
           if (ack != SWD_ACK_OK)
             break;
@@ -315,13 +317,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
          * Uses swd_req (not RDBUFF) so AP reads re-post each
          * iteration, returning fresh data for polling. */
         do {
-          for (retry = 0; retry <= dap->retry_count; retry++) {
-            ack = swd_transfer(swd_req, &data, dap->clk_div,
-                               dap->idle_cycles, dap->turnaround,
-                               dap->data_phase);
-            if (ack != SWD_ACK_WAIT || dap->abort)
-              break;
-          }
+          ack = swd_retry(dap, swd_req, &data);
           transfer_response = ack;
           if (ack != SWD_ACK_OK)
             break;
@@ -338,13 +334,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
         if (post_read == 0U) {
           if (request & DAP_TRANSFER_APnDP) {
             /* Post AP read. */
-            for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(swd_req, NULL, dap->clk_div,
-                                 dap->idle_cycles, dap->turnaround,
-                                 dap->data_phase);
-              if (ack != SWD_ACK_WAIT || dap->abort)
-                break;
-            }
+            ack = swd_retry(dap, swd_req, NULL);
             transfer_response = ack;
             if (ack != SWD_ACK_OK)
               break;
@@ -352,21 +342,13 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
           }
           else {
             /* Read DP register. */
-            for (retry = 0; retry <= dap->retry_count; retry++) {
-              ack = swd_transfer(swd_req, &data, dap->clk_div,
-                                 dap->idle_cycles, dap->turnaround,
-                                 dap->data_phase);
-              if (ack != SWD_ACK_WAIT || dap->abort)
-                break;
-            }
+            ack = swd_retry(dap, swd_req, &data);
             transfer_response = ack;
             if (ack != SWD_ACK_OK)
               break;
             /* Store data. */
-            resp[resp_idx++] = (uint8_t)(data);
-            resp[resp_idx++] = (uint8_t)(data >> 8);
-            resp[resp_idx++] = (uint8_t)(data >> 16);
-            resp[resp_idx++] = (uint8_t)(data >> 24);
+            put_le32(&resp[resp_idx], data);
+            resp_idx += 4U;
           }
         }
       }
@@ -376,29 +358,18 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       /* Write register. */
       if (post_read) {
         /* Read previous data. */
-        for (retry = 0; retry <= dap->retry_count; retry++) {
-          ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
-                             dap->idle_cycles, dap->turnaround,
-                             dap->data_phase);
-          if (ack != SWD_ACK_WAIT || dap->abort)
-            break;
-        }
+        ack = swd_retry(dap, rdbuff_req, &data);
         transfer_response = ack;
         if (ack != SWD_ACK_OK)
           break;
         /* Store previous data. */
-        resp[resp_idx++] = (uint8_t)(data);
-        resp[resp_idx++] = (uint8_t)(data >> 8);
-        resp[resp_idx++] = (uint8_t)(data >> 16);
-        resp[resp_idx++] = (uint8_t)(data >> 24);
+        put_le32(&resp[resp_idx], data);
+        resp_idx += 4U;
         post_read = 0U;
       }
 
       /* Load data. */
-      data = (uint32_t)req[req_idx] |
-             ((uint32_t)req[req_idx + 1] << 8) |
-             ((uint32_t)req[req_idx + 2] << 16) |
-             ((uint32_t)req[req_idx + 3] << 24);
+      data = get_le32(&req[req_idx]);
       req_idx += 4U;
 
       if (request & DAP_TRANSFER_MATCH_MASK) {
@@ -407,13 +378,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
       }
       else {
         /* Write DP/AP register. */
-        for (retry = 0; retry <= dap->retry_count; retry++) {
-          ack = swd_transfer(swd_req, &data, dap->clk_div,
-                             dap->idle_cycles, dap->turnaround,
-                             dap->data_phase);
-          if (ack != SWD_ACK_WAIT || dap->abort)
-            break;
-        }
+        ack = swd_retry(dap, swd_req, &data);
         transfer_response = ack;
         if (ack != SWD_ACK_OK)
           break;
@@ -430,18 +395,10 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
   if (transfer_response == SWD_ACK_OK) {
     if (post_read) {
       /* Read previous data. */
-      for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(rdbuff_req, &data, dap->clk_div,
-                           dap->idle_cycles, dap->turnaround,
-                           dap->data_phase);
-        if (ack != SWD_ACK_WAIT || dap->abort)
-          break;
-      }
+      ack = swd_retry(dap, rdbuff_req, &data);
       if (ack == SWD_ACK_OK) {
-        resp[resp_idx++] = (uint8_t)(data);
-        resp[resp_idx++] = (uint8_t)(data >> 8);
-        resp[resp_idx++] = (uint8_t)(data >> 16);
-        resp[resp_idx++] = (uint8_t)(data >> 24);
+        put_le32(&resp[resp_idx], data);
+        resp_idx += 4U;
       }
       else {
         transfer_response = ack;
@@ -449,13 +406,7 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
     }
     else if (check_write) {
       /* Verify last write didn't cause a fault. */
-      for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
-                           dap->idle_cycles, dap->turnaround,
-                           dap->data_phase);
-        if (ack != SWD_ACK_WAIT || dap->abort)
-          break;
-      }
+      ack = swd_retry(dap, rdbuff_req, NULL);
       if (ack != SWD_ACK_OK)
         transfer_response = ack;
     }
@@ -481,7 +432,6 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
   uint32_t data;
   uint8_t  ack = 0U;
   uint8_t  swd_req;
-  uint32_t retry;
   uint32_t n;
 
   resp[0] = DAP_CMD_TRANSFER_BLOCK;
@@ -497,13 +447,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
     /* Block read. */
     if (request & DAP_TRANSFER_APnDP) {
       /* AP read: issue dummy read first to prime pipeline. */
-      for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(swd_req, NULL, dap->clk_div,
-                           dap->idle_cycles, dap->turnaround,
-                           dap->data_phase);
-        if (ack != SWD_ACK_WAIT || dap->abort)
-          break;
-      }
+      ack = swd_retry(dap, swd_req, NULL);
       if (ack != SWD_ACK_OK)
         goto block_done;
     }
@@ -518,20 +462,12 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
       else
         read_req = swd_req;
 
-      for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(read_req, &data, dap->clk_div,
-                           dap->idle_cycles, dap->turnaround,
-                           dap->data_phase);
-        if (ack != SWD_ACK_WAIT || dap->abort)
-          break;
-      }
+      ack = swd_retry(dap, read_req, &data);
       if (ack != SWD_ACK_OK)
         break;
 
-      resp[resp_idx++] = (uint8_t)(data);
-      resp[resp_idx++] = (uint8_t)(data >> 8);
-      resp[resp_idx++] = (uint8_t)(data >> 16);
-      resp[resp_idx++] = (uint8_t)(data >> 24);
+      put_le32(&resp[resp_idx], data);
+      resp_idx += 4U;
       transfer_count++;
     }
   }
@@ -541,19 +477,10 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
       if (dap->abort)
         break;
 
-      data = (uint32_t)req[req_idx] |
-             ((uint32_t)req[req_idx + 1] << 8) |
-             ((uint32_t)req[req_idx + 2] << 16) |
-             ((uint32_t)req[req_idx + 3] << 24);
+      data = get_le32(&req[req_idx]);
       req_idx += 4U;
 
-      for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(swd_req, &data, dap->clk_div,
-                           dap->idle_cycles, dap->turnaround,
-                           dap->data_phase);
-        if (ack != SWD_ACK_WAIT || dap->abort)
-          break;
-      }
+      ack = swd_retry(dap, swd_req, &data);
       if (ack != SWD_ACK_OK)
         break;
       transfer_count++;
@@ -562,13 +489,7 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
     /* Check last write result by reading RDBUFF. */
     if (ack == SWD_ACK_OK) {
       uint8_t rdbuff_req = swd_request_byte(DAP_TRANSFER_RnW | (0x03U << 2));
-      for (retry = 0; retry <= dap->retry_count; retry++) {
-        ack = swd_transfer(rdbuff_req, NULL, dap->clk_div,
-                           dap->idle_cycles, dap->turnaround,
-                           dap->data_phase);
-        if (ack != SWD_ACK_WAIT || dap->abort)
-          break;
-      }
+      ack = swd_retry(dap, rdbuff_req, NULL);
     }
   }
 
@@ -587,26 +508,12 @@ static uint32_t dap_write_abort(dap_data_t *dap, const uint8_t *req,
                                  uint8_t *resp) {
   /* Write to DP ABORT register (DP, Write, A[3:2]=0). */
   uint32_t data;
-  uint8_t swd_req;
   uint8_t ack;
-  uint32_t retry;
 
   resp[0] = DAP_CMD_WRITE_ABORT;
 
-  data = (uint32_t)req[2] |
-         ((uint32_t)req[3] << 8) |
-         ((uint32_t)req[4] << 16) |
-         ((uint32_t)req[5] << 24);
-
-  swd_req = swd_request_byte(0U);  /* DP, Write, A[3:2]=0 → ABORT reg */
-
-  for (retry = 0; retry <= dap->retry_count; retry++) {
-    ack = swd_transfer(swd_req, &data, dap->clk_div,
-                       dap->idle_cycles, dap->turnaround,
-                       dap->data_phase);
-    if (ack != SWD_ACK_WAIT)
-      break;
-  }
+  data = get_le32(&req[2]);
+  ack = swd_retry(dap, swd_request_byte(0U), &data);
 
   resp[1] = (ack == SWD_ACK_OK) ? DAP_OK : DAP_ERROR;
   return 2U;
@@ -619,10 +526,7 @@ static uint32_t dap_write_abort(dap_data_t *dap, const uint8_t *req,
 static uint32_t dap_swj_pins(const uint8_t *req, uint8_t *resp) {
   uint8_t pin_output = req[1];
   uint8_t pin_select = req[2];
-  uint32_t wait_us = (uint32_t)req[3] |
-                     ((uint32_t)req[4] << 8) |
-                     ((uint32_t)req[5] << 16) |
-                     ((uint32_t)req[6] << 24);
+  uint32_t wait_us = get_le32(&req[3]);
 
   resp[0] = DAP_CMD_SWJ_PINS;
 
@@ -700,10 +604,7 @@ static uint32_t dap_swj_pins(const uint8_t *req, uint8_t *resp) {
 
 static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
                                uint8_t *resp) {
-  uint32_t clock = (uint32_t)req[1] |
-                   ((uint32_t)req[2] << 8) |
-                   ((uint32_t)req[3] << 16) |
-                   ((uint32_t)req[4] << 24);
+  uint32_t clock = get_le32(&req[1]);
 
   resp[0] = DAP_CMD_SWJ_CLOCK;
 
@@ -733,15 +634,14 @@ static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
 /* DAP_SWJ_Sequence (0x12).                                                  */
 /*===========================================================================*/
 
-static uint32_t dap_swj_sequence(dap_data_t *dap, const uint8_t *req,
-                                  uint8_t *resp) {
+static uint32_t dap_swj_sequence(const uint8_t *req, uint8_t *resp) {
   uint32_t count = req[1];
   if (count == 0U)
     count = 256U;
 
   resp[0] = DAP_CMD_SWJ_SEQUENCE;
 
-  swj_sequence(count, &req[2], dap->clk_div);
+  swj_sequence(count, &req[2]);
 
   resp[1] = DAP_OK;
   return 2U;
@@ -767,8 +667,7 @@ static uint32_t dap_swd_configure(dap_data_t *dap, const uint8_t *req,
 /* DAP_SWD_Sequence (0x1D).                                                  */
 /*===========================================================================*/
 
-static uint32_t dap_swd_sequence(dap_data_t *dap, const uint8_t *req,
-                                  uint8_t *resp) {
+static uint32_t dap_swd_sequence(const uint8_t *req, uint8_t *resp) {
   uint32_t req_idx = 1U;
   uint32_t resp_idx = 2U;
   uint32_t seq_count = req[req_idx++];
@@ -786,12 +685,12 @@ static uint32_t dap_swd_sequence(dap_data_t *dap, const uint8_t *req,
 
     if (info & 0x80U) {
       /* Input: capture bits to response. */
-      swd_sequence(info, NULL, &resp[resp_idx], dap->clk_div);
+      swd_sequence(info, NULL, &resp[resp_idx]);
       resp_idx += bytes;
     }
     else {
       /* Output: send bits from request. */
-      swd_sequence(info, &req[req_idx], NULL, dap->clk_div);
+      swd_sequence(info, &req[req_idx], NULL);
       req_idx += bytes;
     }
   }
@@ -991,13 +890,13 @@ uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
     return dap_swj_clock(dap, request, response);
 
   case DAP_CMD_SWJ_SEQUENCE:
-    return dap_swj_sequence(dap, request, response);
+    return dap_swj_sequence(request, response);
 
   case DAP_CMD_SWD_CONFIGURE:
     return dap_swd_configure(dap, request, response);
 
   case DAP_CMD_SWD_SEQUENCE:
-    return dap_swd_sequence(dap, request, response);
+    return dap_swd_sequence(request, response);
 
   case DAP_CMD_QUEUE_COMMANDS:
   case DAP_CMD_EXECUTE_COMMANDS:

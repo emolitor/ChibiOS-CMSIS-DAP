@@ -161,21 +161,18 @@ void swd_off(void) {
  *
  * @param[in]     request       SWD request byte
  * @param[in,out] data          pointer to 32-bit data
- * @param[in]     clk_div       PIO clock divider (16.8 fixed-point)
  * @param[in]     idle_cycles   number of idle cycles after transfer
  * @param[in]     turnaround    turnaround clock cycles
  * @param[in]     data_phase    if nonzero, clock data phase on WAIT/FAULT
  * @return        ACK value
  */
 RAMFUNC uint8_t swd_transfer(uint32_t request, uint32_t *data,
-                              uint32_t clk_div, uint32_t idle_cycles,
-                              uint32_t turnaround, uint32_t data_phase) {
+                              uint32_t idle_cycles, uint32_t turnaround,
+                              uint32_t data_phase) {
   uint32_t ack;
   uint32_t val;
   uint32_t parity;
   uint32_t bit;
-
-  (void)clk_div;  /* Clock set once at init/reconfigure, not per-transfer. */
 
   /* --- Request phase (8 bits) --- */
   probe_write_bits(8U, request);
@@ -244,12 +241,9 @@ RAMFUNC uint8_t swd_transfer(uint32_t request, uint32_t *data,
  *
  * @param[in] count     number of bits to output
  * @param[in] data      bit data (LSB first, packed bytes)
- * @param[in] clk_div   PIO clock divider (unused, set at init)
  */
-RAMFUNC void swj_sequence(uint32_t count, const uint8_t *data, uint32_t clk_div) {
+RAMFUNC void swj_sequence(uint32_t count, const uint8_t *data) {
   uint32_t remaining = count;
-
-  (void)clk_div;
 
   while (remaining > 0U) {
     uint32_t chunk = remaining;
@@ -277,15 +271,11 @@ RAMFUNC void swj_sequence(uint32_t count, const uint8_t *data, uint32_t clk_div)
  * @param[in]  info       bit[5:0]=count (0 means 64), bit[7]=direction
  * @param[in]  swdo       output data (when direction=0)
  * @param[out] swdi       input data (when direction=1)
- * @param[in]  clk_div    PIO clock divider (unused, set at init)
  */
-RAMFUNC void swd_sequence(uint32_t info, const uint8_t *swdo, uint8_t *swdi,
-                           uint32_t clk_div) {
+RAMFUNC void swd_sequence(uint32_t info, const uint8_t *swdo, uint8_t *swdi) {
   uint32_t count = info & 0x3FU;
   uint32_t remaining;
   uint32_t offset = 0U;
-
-  (void)clk_div;
 
   if (count == 0U)
     count = 64U;

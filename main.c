@@ -160,7 +160,6 @@ void dap_usb_in_cb(USBDriver *usbp, usbep_t ep) {
 /*===========================================================================*/
 
 static virtual_timer_t led_vt;
-static bool usb_active;
 static bool dap_connected;
 static bool dap_running;
 
@@ -543,15 +542,8 @@ int main(void) {
   while (true) {
     eventmask_t events = chEvtWaitAny(EVENT_MASK(0) | EVENT_MASK(1));
 
-    if (events & EVENT_MASK(0)) {
-      eventflags_t flags = chEvtGetAndClearFlags(&el_usb);
-      if (flags & EVT_USB_CONFIGURED)
-        usb_active = true;
-      if (flags & (EVT_USB_RESET | EVT_USB_SUSPENDED))
-        usb_active = false;
-      if (flags & EVT_USB_WAKEUP)
-        usb_active = true;
-    }
+    if (events & EVENT_MASK(0))
+      chEvtGetAndClearFlags(&el_usb);
     if (events & EVENT_MASK(1)) {
       eventflags_t flags = chEvtGetAndClearFlags(&el_dap);
       if (flags & EVT_DAP_CONNECTED)

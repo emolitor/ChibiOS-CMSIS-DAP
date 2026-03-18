@@ -575,7 +575,7 @@ static uint32_t dap_swj_pins(const uint8_t *req, uint8_t *resp) {
         match_val |= NRESET_BIT;
     }
 
-    rtcnt_t timeout = US2RTC(RP_CLK_SYS_FREQ, wait_us);
+    rtcnt_t timeout = (rtcnt_t)wait_us;  /* RT counter is 1 MHz on all SMP ports */
     rtcnt_t start   = chSysGetRealtimeCounterX();
     do {
       if ((SIO_GPIO_IN & check_mask) == match_val)

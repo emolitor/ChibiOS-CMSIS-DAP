@@ -63,25 +63,24 @@ ifndef TARGET
 all clean:
 	$(MAKE) TARGET=rp2040 $@
 	$(MAKE) TARGET=rp2350 $@
+	$(MAKE) TARGET=rp2350_riscv $@
 else
 
 ifeq ($(TARGET),rp2040)
   MCU  = cortex-m0plus
-  ifeq ($(USE_FPU),)
-    USE_FPU = no
-  endif
+  USE_FPU = no
   TARGET_DEFS = -DTARGET_RP2040
 else ifeq ($(TARGET),rp2350)
   MCU  = cortex-m33
-  ifeq ($(USE_FPU),)
-    USE_FPU = softfp
-  endif
-  ifeq ($(USE_FPU_OPT),)
-    USE_FPU_OPT = -mfloat-abi=$(USE_FPU) -mfpu=fpv5-sp-d16
-  endif
+  USE_FPU = no
   TARGET_DEFS = -DTARGET_RP2350
+else ifeq ($(TARGET),rp2350_riscv)
+  MCU  = rv32imac_zba_zbb_zbs_zbkb_zcb_zcmp
+  USE_FPU = no
+  USE_LTO = no
+  TARGET_DEFS = -DTARGET_RP2350 -DTARGET_RISCV
 else
-  $(error Unknown TARGET=$(TARGET). Use rp2040 or rp2350)
+  $(error Unknown TARGET=$(TARGET). Use rp2040, rp2350, or rp2350_riscv)
 endif
 
 #
@@ -133,6 +132,12 @@ include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
 include $(CHIBIOS)/os/common/ports/ARMv8-M-ML-ALT/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2350_FLASH.ld
+else ifeq ($(TARGET),rp2350_riscv)
+include $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk/startup_rp2350_riscv.mk
+include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform_riscv.mk
+include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
+include $(CHIBIOS)/os/common/ports/RISCV-HAZARD3/compilers/GCC/mk/port_rp2.mk
+LDSCRIPT = $(STARTUPLD)/RP2350_RISCV_FLASH.ld
 endif
 include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
@@ -164,9 +169,13 @@ CPPWARN = -Wall -Wextra -Wundef
 # User section
 #
 
+ifeq ($(TARGET),rp2350_riscv)
+UDEFS = -DCRT0_EXTRA_CORES_NUMBER=1 -DRP_PIO_REQUIRED $(TARGET_DEFS)
+UADEFS = -DCRT0_EXTRA_CORES_NUMBER=1 $(TARGET_DEFS)
+else
 UDEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 -DRP_PIO_REQUIRED $(TARGET_DEFS)
-
 UADEFS = -DCRT0_VTOR_INIT=1 -DCRT0_EXTRA_CORES_NUMBER=1 $(TARGET_DEFS)
+endif
 
 UINCDIR =
 
@@ -182,8 +191,13 @@ ULIBS =
 # Rules
 #
 
+ifeq ($(TARGET),rp2350_riscv)
+RULESPATH = $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk
+include $(RULESPATH)/riscv-none-elf.mk
+else
 RULESPATH = $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk
 include $(RULESPATH)/arm-none-eabi.mk
+endif
 include $(RULESPATH)/rules.mk
 
 #

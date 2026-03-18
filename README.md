@@ -8,7 +8,7 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 - **UART bridge** via USB CDC ACM at 115200 baud
 - **Dual-core SMP**: Core 0 handles USB, Core 1 processes DAP commands
 - **PIO-based SWD** Derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe)
-- **Dual-target support**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
+- **Triple-target support**: RP2040 (Cortex-M0+), RP2350 (Cortex-M33), and RP2350 (Hazard3 RISC-V)
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)
 
 ## Performance
@@ -20,7 +20,8 @@ Performance is comparable to the Retail Raspberry Pi Debug Probe.
 | Probe | System Clock | PIO Cycles/Bit | Theoretical Max | Tested Max |
 |-------|-------------|-----------------|-----------------|------------|
 | RP2040 | 200 MHz | 4 | 50 MHz | 25 MHz |
-| RP2350 | 150 MHz | 4 | 37.5 MHz | 25 MHz |
+| RP2350 (ARM) | 150 MHz | 4 | 37.5 MHz | 25 MHz |
+| RP2350 (RISC-V) | 150 MHz | 4 | 37.5 MHz | 25 MHz |
 
 The maximum tested speed is limited by the target's SWD debug port, not the probe's PIO.
 
@@ -28,10 +29,12 @@ The maximum tested speed is limited by the target's SWD debug port, not the prob
 
 | Probe | SWD Clock | Throughput |
 |-------|-----------|------------|
-| RP2040 | 15 MHz | 526 KB/s |
-| RP2350 | 25 MHz | 526 KB/s |
+| RP2350 (ARM) | 15 MHz | 710 KB/s |
+| RP2350 (ARM) | 25 MHz | 744 KB/s |
+| RP2350 (RISC-V) | 15 MHz | 743 KB/s |
+| RP2350 (RISC-V) | 25 MHz | 746 KB/s |
 
-Realistic throughput plateaus above ~10 MHz as USB bulk transfer overhead becomes the bottleneck.
+All targets are USB-limited at ~745 KB/s at 25 MHz.
 
 ## Pin Assignment
 
@@ -60,6 +63,7 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 ### Prerequisites
 
 - `arm-none-eabi-gcc` toolchain
+- `riscv-none-elf-gcc` toolchain (for RISC-V target)
 - `picotool` (for UF2 conversion and flashing)
 - `svn` (to check out ChibiOS)
 
@@ -67,14 +71,19 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 
 ```bash
 make chibios                  # check out ChibiOS from SVN (first time only)
-make                          # build both targets (produces build/rp2040/ch.elf and build/rp2350/ch.elf)
+make                          # build all targets (rp2040, rp2350, rp2350_riscv)
+make TARGET=rp2040            # build RP2040 only
+make TARGET=rp2350            # build RP2350 ARM only
+make TARGET=rp2350_riscv      # build RP2350 RISC-V only
 ```
 
 ### Flash
 
-1. Hold BOOTSEL on the Pico and plug it in — it mounts as a USB mass storage drive (e.g., `RPI-RP2`)
-2. Build the UF2: `make`
-3. Copy `build/rp2040/ch.uf2` or `build/rp2350/ch.uf2` to the drive — the Pico reboots automatically
+1. Hold BOOTSEL on the Pico and plug it in
+2. Build the UF2: `make TARGET=<target> build/<target>/ch.uf2`
+3. Copy the UF2 to the drive — the Pico reboots automatically
+
+Or flash via SWD with OpenOCD / another debug probe.
 
 ## License
 

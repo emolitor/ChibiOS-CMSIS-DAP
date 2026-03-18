@@ -44,7 +44,6 @@
 /*
  * IRQ system settings.
  */
-#define RP_IRQ_SYSTICK_PRIORITY             2
 #define RP_IRQ_UART0_PRIORITY               3
 #define RP_IRQ_UART1_PRIORITY               3
 #define RP_IRQ_SPI0_PRIORITY                2

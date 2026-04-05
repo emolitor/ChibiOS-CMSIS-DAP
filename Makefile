@@ -53,17 +53,34 @@ endif
 # Build global options
 ##############################################################################
 
+# ChibiOS location — default to ./ChibiOS checked out via 'make chibios'.
+CHIBIOS     ?= ./ChibiOS
+CHIBIOS_SVN ?= svn://svn.code.sf.net/p/chibios/code/trunk
+PICOTOOL    ?= picotool
+
+CHIBIOS_RP2350_RISCV_STARTUP := $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk/startup_rp2350_riscv.mk
+CHIBIOS_RP2350_RISCV_PLATFORM := $(CHIBIOS)/os/hal/ports/RP/RP2350/platform_riscv.mk
+CHIBIOS_RP2350_RISCV_PORT := $(CHIBIOS)/os/common/ports/RISCV-HAZARD3/compilers/GCC/mk/port_rp2.mk
+
+ifneq ($(wildcard $(CHIBIOS_RP2350_RISCV_STARTUP) $(CHIBIOS_RP2350_RISCV_PLATFORM) $(CHIBIOS_RP2350_RISCV_PORT)),)
+ifneq ($(words $(wildcard $(CHIBIOS_RP2350_RISCV_STARTUP) $(CHIBIOS_RP2350_RISCV_PLATFORM) $(CHIBIOS_RP2350_RISCV_PORT))),3)
+$(error Incomplete RP2350 RISC-V support detected under $(CHIBIOS); expected Hazard3 startup, platform, and port makefiles)
+endif
+CHIBIOS_HAS_RP2350_RISCV := yes
+else
+CHIBIOS_HAS_RP2350_RISCV := no
+endif
+
 ##############################################################################
 # Target selection
 #
 
-# When TARGET is not specified, build all targets.
+# When TARGET is not specified, build the default ARM targets.
 ifndef TARGET
 .PHONY: all clean
 all clean:
 	$(MAKE) TARGET=rp2040 $@
 	$(MAKE) TARGET=rp2350 $@
-	$(MAKE) TARGET=rp2350_riscv $@
 else
 
 ifeq ($(TARGET),rp2040)
@@ -80,7 +97,7 @@ else ifeq ($(TARGET),rp2350_riscv)
   USE_LTO = no
   TARGET_DEFS = -DTARGET_RP2350 -DTARGET_RISCV
 else
-  $(error Unknown TARGET=$(TARGET). Use rp2040, rp2350, or rp2350_riscv)
+  $(error Unknown TARGET=$(TARGET). Use rp2040 or rp2350; rp2350_riscv requires a compatible ChibiOS checkout)
 endif
 
 #
@@ -93,14 +110,9 @@ endif
 
 PROJECT = ch
 
-# ChibiOS location — default to ./ChibiOS checked out via 'make chibios'.
-CHIBIOS  ?= ./ChibiOS
 CONFDIR  := ./cfg
 BUILDDIR := ./build/$(TARGET)
 DEPDIR   := ./.dep
-
-PICOTOOL ?= picotool
-CHIBIOS_SVN ?= svn://svn.code.sf.net/p/chibios/code/trunk
 
 # Guard: ChibiOS must exist for build targets.
 ifeq ($(wildcard $(CHIBIOS)/os/license/license.mk),)
@@ -133,11 +145,15 @@ include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
 include $(CHIBIOS)/os/common/ports/ARMv8-M-ML-ALT/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2350_FLASH.ld
 else ifeq ($(TARGET),rp2350_riscv)
+ifeq ($(CHIBIOS_HAS_RP2350_RISCV),yes)
 include $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk/startup_rp2350_riscv.mk
 include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform_riscv.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
 include $(CHIBIOS)/os/common/ports/RISCV-HAZARD3/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2350_RISCV_FLASH.ld
+else
+$(error TARGET=rp2350_riscv is unavailable in this ChibiOS checkout; current Trunk only ships the ARM RP2040/RP2350 ports)
+endif
 endif
 include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk

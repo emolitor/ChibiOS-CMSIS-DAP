@@ -240,7 +240,8 @@ static const uint8_t string2[] = {
   ')', 0
 };
 
-/* String 3: Serial Number (mutable, populated at boot from flash unique ID). */
+/* String 3: Serial Number (mutable, initialized to a placeholder value and
+ * overwritten at boot from the flash unique ID). */
 static uint8_t string3[34] = {
   34, 0x03, /* bLength, bDescriptorType (STRING) */
   '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '0', 0,

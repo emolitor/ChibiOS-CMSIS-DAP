@@ -5,10 +5,11 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 ## Features
 
 - **CMSIS-DAP v2** over USB bulk endpoints (WinUSB — driverless on Windows)
-- **UART bridge** via USB CDC ACM at 115200 baud
-- **Dual-core SMP**: Core 0 handles USB, Core 1 processes DAP commands
+- **UART bridge** via USB CDC ACM with host-selectable baud rate and framing
+- **Dual-core SMP model**:
+  Core 0 runs the main thread, `DapThread`, and `UartThread`; Core 1 runs `DapProcessThread`
 - **PIO-based SWD** Derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe)
-- **Triple-target support**: RP2040 (Cortex-M0+), RP2350 (Cortex-M33), and RP2350 (Hazard3 RISC-V)
+- **Current ChibiOS Trunk targets**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)
 
 ## Performance
@@ -21,8 +22,6 @@ Performance is comparable to the Retail Raspberry Pi Debug Probe.
 |-------|-------------|-----------------|-----------------|------------|
 | RP2040 | 200 MHz | 4 | 50 MHz | 25 MHz |
 | RP2350 (ARM) | 150 MHz | 4 | 37.5 MHz | 25 MHz |
-| RP2350 (RISC-V) | 150 MHz | 4 | 37.5 MHz | 25 MHz |
-
 The maximum tested speed is limited by the target's SWD debug port, not the probe's PIO.
 
 ### Throughput (64 KB SRAM read via OpenOCD)
@@ -31,10 +30,7 @@ The maximum tested speed is limited by the target's SWD debug port, not the prob
 |-------|-----------|------------|
 | RP2350 (ARM) | 15 MHz | 710 KB/s |
 | RP2350 (ARM) | 25 MHz | 744 KB/s |
-| RP2350 (RISC-V) | 15 MHz | 743 KB/s |
-| RP2350 (RISC-V) | 25 MHz | 746 KB/s |
-
-All targets are USB-limited at ~745 KB/s at 25 MHz.
+Current Trunk-supported targets are USB-limited at ~745 KB/s at 25 MHz.
 
 ## Pin Assignment
 
@@ -56,6 +52,10 @@ These match the Raspberry Pi Debug Probe pinout, so any wiring guide for that pr
 - **Interface 0**: CMSIS-DAP v2 (Vendor class, Bulk EP1 IN/OUT)
 - **Interfaces 1-2**: CDC ACM UART bridge (Bulk EP2 IN/OUT, Interrupt EP3 IN)
 
+The UART bridge applies the host CDC line-coding settings to UART1, so baud
+rate, data bits, parity, and stop bits follow the terminal or debugger
+configuration rather than being fixed in firmware.
+
 Includes a BOS descriptor with Platform Capability for automatic WinUSB driver binding on Windows.
 
 ## Building
@@ -63,7 +63,6 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 ### Prerequisites
 
 - `arm-none-eabi-gcc` toolchain
-- `riscv-none-elf-gcc` toolchain (for RISC-V target)
 - `picotool` (for UF2 conversion and flashing)
 - `svn` (to check out ChibiOS)
 
@@ -71,10 +70,9 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 
 ```bash
 make chibios                  # check out ChibiOS from SVN (first time only)
-make                          # build all targets (rp2040, rp2350, rp2350_riscv)
+make                          # build the default ARM targets (rp2040, rp2350)
 make TARGET=rp2040            # build RP2040 only
 make TARGET=rp2350            # build RP2350 ARM only
-make TARGET=rp2350_riscv      # build RP2350 RISC-V only
 ```
 
 ### Flash

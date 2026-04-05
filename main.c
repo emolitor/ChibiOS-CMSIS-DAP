@@ -16,17 +16,17 @@
  */
 
 /*
- * CMSIS-DAP v2 Debug Probe — RP2040 Dual-Core SMP Implementation
+ * CMSIS-DAP v2 Debug Probe — RP2040/RP2350 Dual-Core SMP Implementation
  *
- * Core 0 (ChibiOS RT SMP):
- *   - USB composite device (CMSIS-DAP v2 + CDC ACM)
+ * Core 0 runtime:
+ *   - Main thread: hardware init, USB bring-up, LED state machine
  *   - DapThread: pipelined USB bulk ↔ object FIFO/mailbox pipeline
  *   - UartThread: USB CDC ↔ I/O queue UART bridge
- *   - Main thread: event-driven LED with virtual timer
  *
- * Core 1 (ChibiOS RT SMP):
+ * Core 1 runtime:
  *   - DapProcessThread: DAP command processing
- *   - SWD via PIO state machine (deterministic timing)
+ *
+ * SWD transfers execute from DapProcessThread via the PIO state machine.
  *
  * Pin layout (matching Pico Debug Probe):
  *   GPIO 1: nRESET (open-drain)
@@ -82,18 +82,27 @@ static void uid_to_hex(const uint8_t *uid, char *hex, uint32_t len) {
 
 /*===========================================================================*/
 /* Early flash unique ID read (runs before main, before Core 1 starts).      */
+/* USB serial string initialization.                                         */
 /*===========================================================================*/
 
 /**
  * @brief   CRT0 late init hook — runs after BSS/DATA init, before main().
  */
 void __late_init(void) {
-  uint8_t uid[8];
-  char serial_hex[17];
+  uint8_t uid[4U + RP_FLASH_UNIQUE_ID_SIZE];
+  char serial_hex[RP_FLASH_UNIQUE_ID_SIZE * 2U + 1U];
+  uint32_t primask;
 
-  efl_lld_read_unique_id(&EFLD1, uid);
-  uid_to_hex(uid, serial_hex, 8U);
+  /* Prepare any platform-specific RAM state needed before XIP is toggled. */
+  /* This is idempotent on RP devices. */
+  rp_efl_lld_init();
 
+  primask = __get_PRIMASK();
+  __disable_irq();
+  rp_efl_lld_read_uid_full(&EFLD1, uid, sizeof(uid));
+  __set_PRIMASK(primask);
+
+  uid_to_hex(uid + 4U, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
   dap_set_serial(serial_hex);
   usb_set_serial_string(serial_hex);
 }
@@ -117,8 +126,7 @@ static msg_t resp_mbox_buf[DAP_POOL_SIZE];
 static mailbox_t resp_mbox;
 
 /*===========================================================================*/
-/* DAP state (accessed by DapThread on Core 0 and DapProcessThread on        */
-/* Core 1 — only abort flag is cross-core, single-byte relaxed access).      */
+/* DAP state.                                                                */
 /*===========================================================================*/
 
 static dap_data_t dap_state;
@@ -224,7 +232,7 @@ static THD_FUNCTION(DapThread, arg) {
         rx_pkt->cmd_len = dap_rx_len;
 
         if (rx_pkt->cmd[0] == DAP_CMD_TRANSFER_ABORT) {
-          /* Handle abort locally — must not queue to Core 1. */
+          /* Handle abort locally — must not queue to the worker thread. */
           dap_state.abort = 1U;
           __DSB();
 
@@ -264,7 +272,7 @@ static THD_FUNCTION(DapThread, arg) {
           tx_pkt = rx_pkt;
         }
         else {
-          /* Send command to Core 1 via object FIFO. */
+          /* Send command to the worker thread via object FIFO. */
           chFifoSendObject(&cmd_fifo, rx_pkt);
           inflight++;
         }
@@ -443,7 +451,7 @@ static THD_FUNCTION(UartThread, arg) {
 }
 
 /*===========================================================================*/
-/* Core 1 — ChibiOS SMP instance.                                           */
+/* Core 1 entry point.                                                       */
 /*===========================================================================*/
 
 void c1_main(void) {
@@ -463,7 +471,7 @@ void c1_main(void) {
 }
 
 /*===========================================================================*/
-/* Core 0 — main (ChibiOS RT SMP).                                          */
+/* Main thread.                                                              */
 /*===========================================================================*/
 
 int main(void) {
@@ -471,9 +479,6 @@ int main(void) {
 
   /*
    * Initialize all shared kernel objects before chSysInit().
-   * Core 1 will proceed through chSysWaitSystemState() once
-   * chSysInit() sets ch_sys_running, so everything must be
-   * ready before that.
    */
 
   /* Event sources. */
@@ -482,13 +487,10 @@ int main(void) {
   chEvtObjectInit(&evt_uart);
 
   /* Object FIFO for DAP command pipeline.
-   * Initialize components manually because chFifoObjectInit() calls
-   * chGuardedPoolLoadArray() which uses chGuardedPoolFree() — that
-   * acquires the SMP kernel spinlock, which isn't available before
-   * chSysInit(). Use plain chPoolLoadArray() + direct sem init instead. */
+   * Pool and mailbox structures are initialized here; the pool is loaded
+   * after chSysInit() so that chPoolLoadArray() can take kernel locks. */
   chPoolObjectInit(&cmd_fifo.free.pool, sizeof(dap_packet_t), NULL);
   chSemObjectInit(&cmd_fifo.free.sem, (cnt_t)DAP_POOL_SIZE);
-  chPoolLoadArray(&cmd_fifo.free.pool, dap_packets, DAP_POOL_SIZE);
   chMBObjectInit(&cmd_fifo.mbx, cmd_fifo_buf, DAP_POOL_SIZE);
   chMBObjectInit(&resp_mbox, resp_mbox_buf, DAP_POOL_SIZE);
 
@@ -498,12 +500,22 @@ int main(void) {
   /* Input queue for UART bridge RX. */
   iqObjectInit(&uart_rx_iq, uart_rx_qbuf, UART_QUEUE_SIZE, NULL, NULL);
 
-  /* Start the RTOS — Core 1 proceeds from chSysWaitSystemState(). */
+  /* Start the RTOS.  Core 1 proceeds from chSysWaitSystemState(). */
   chSysInit();
+
+  /* Load pool objects now that kernel locks are available. */
+  chPoolLoadArray(&cmd_fifo.free.pool, dap_packets, DAP_POOL_SIZE);
 
   /* Initialize Serial-over-USB CDC driver (for UART bridge). */
   sduObjectInit(&SDU1);
   sduStart(&SDU1, &serusbcfg);
+
+  /* Start worker threads before exposing USB so endpoint callbacks always
+   * have valid thread targets as soon as the host starts probing. */
+  dap_thd = chThdCreateStatic(waDapThread, sizeof(waDapThread),
+                               NORMALPRIO + 1, DapThread, NULL);
+  chThdCreateStatic(waUartThread, sizeof(waUartThread),
+                    NORMALPRIO, UartThread, NULL);
 
   /* Start USB with disconnect/reconnect pattern. */
   usbDisconnectBus(serusbcfg.usbp);
@@ -520,14 +532,6 @@ int main(void) {
 
   /* Configure LED pin. */
   palSetLineMode(LED_PIN, PAL_MODE_OUTPUT_PUSHPULL);
-
-  /* Start DAP thread (higher priority). */
-  dap_thd = chThdCreateStatic(waDapThread, sizeof(waDapThread),
-                               NORMALPRIO + 1, DapThread, NULL);
-
-  /* Start UART bridge thread. */
-  chThdCreateStatic(waUartThread, sizeof(waUartThread),
-                    NORMALPRIO, UartThread, NULL);
 
   /* Register for USB and DAP events. */
   event_listener_t el_usb, el_dap;

@@ -288,8 +288,13 @@ else
 	  for patch in $(CHIBIOS_PATCHES); do \
 	    git -C $(CHIBIOS) apply --reverse "$$patch"; \
 	  done; \
-	  test -z "$$(git -C $(CHIBIOS) status --porcelain)" || \
-	    { echo "Error: $(CHIBIOS) has changes other than the expected patches"; exit 1; }; \
+	  if test -n "$$(git -C $(CHIBIOS) status --porcelain)"; then \
+	    for patch in $(CHIBIOS_PATCHES); do \
+	      git -C $(CHIBIOS) apply "$$patch" || true; \
+	    done; \
+	    echo "Error: $(CHIBIOS) has changes other than the expected patches"; \
+	    exit 1; \
+	  fi; \
 	  reverted="yes"; \
 	fi; \
 	if test -n "$(strip $(CHIBIOS_REV))"; then \

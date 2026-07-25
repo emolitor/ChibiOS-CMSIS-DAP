@@ -103,10 +103,12 @@ void __late_init(void) {
    */
   err = rp_efl_lld_read_uid_full(&EFLD1, uid, sizeof(uid));
 
-  if (err == FLASH_NO_ERROR)
-    uid_to_hex(uid + 4U, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
-  else
-    uid_to_hex(uid, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
+  /* A failed read may have partially written the buffer, so clear it to a
+   * deterministic all-zero serial instead of publishing stale bytes. */
+  if (err != FLASH_NO_ERROR)
+    memset(uid, 0, sizeof(uid));
+
+  uid_to_hex(uid + 4U, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
   dap_set_serial(serial_hex);
   usb_set_serial_string(serial_hex);
 }

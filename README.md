@@ -67,6 +67,8 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 - `riscv-none-elf-gcc` toolchain (for RP2350 Hazard3)
 - `picotool` (for UF2 conversion and flashing)
 - `git` (to check out ChibiOS)
+- Python 3, a native C compiler, and `pytest` (for host tests)
+- PyUSB and OpenOCD (for the hardware functional tests)
 
 ### Build
 
@@ -87,6 +89,36 @@ builds fail early if the required compatibility is absent.
 
 To use an existing checkout, set `CHIBIOS=/path/to/chibios`. The repository
 URL and branch can be overridden with `CHIBIOS_GIT=` and `CHIBIOS_BRANCH=`.
+
+### Tests
+
+```bash
+make test                     # native unit/sanitizer and descriptor tests
+make check                    # host tests plus all three firmware builds
+```
+
+The host suite uses SWD/platform mocks and runs the CMSIS-DAP parser under
+AddressSanitizer and UndefinedBehaviorSanitizer. Hardware scripts under
+`tests/functional/` validate USB descriptors, CMSIS-DAP commands and atomic
+queuing, the CDC/UART bridge, and OpenOCD SWD transfers:
+
+```bash
+python3 tests/functional/probe_test.py --serial <probe-serial>
+python3 tests/functional/uart_link_test.py \
+  --serial-a <rp2040-serial> --serial-b <rp2350-serial>
+python3 tests/functional/openocd_probe_test.py \
+  --serial <probe-serial> --target rp2040
+```
+
+The functional tests require PyUSB, OpenOCD, and physical wiring appropriate
+to the requested path. Always select devices by serial number when multiple
+probes share VID:PID `2e8a:000c`.
+
+The UART test matches the Raspberry Pi Debug Probe topology: each probe's
+UART1 on GPIO4/5 is wired to the opposite target's UART0 on GPIO1/0. It loads
+a temporary UART0 echo program into target RAM through SWD, tests both probes
+at 115200 8N1, 230400 7E2, and 1 Mbaud 8N1, then watchdog-reboots each target
+back into the firmware in flash.
 
 ### Flash
 

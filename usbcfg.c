@@ -226,9 +226,9 @@ static const uint8_t string0[] = {
 
 /* String 1: Manufacturer. */
 static const uint8_t string1[] = {
-  USB_DESC_BYTE(30), USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
+  USB_DESC_BYTE(26), USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
   'R', 0, 'a', 0, 's', 0, 'p', 0, 'b', 0, 'e', 0, 'r', 0, 'r', 0,
-  'y', 0, ' ', 0, 'P', 0, 'i', 0, ' ', 0, ' ', 0
+  'y', 0, ' ', 0, 'P', 0, 'i', 0
 };
 
 /* String 2: Product (must contain "CMSIS-DAP" for OpenOCD auto-detect). */

@@ -136,13 +136,23 @@ class UartPort:
         return bytes(result)
 
     def _release(self) -> None:
-        for interface in reversed(self.claimed):
-            usb.util.release_interface(self.dev, interface)
-        self.claimed = []
-        for interface in self.detached:
-            self.dev.attach_kernel_driver(interface)
-        self.detached = []
-        usb.util.dispose_resources(self.dev)
+        # Best effort: a failure restoring one interface must not prevent
+        # restoring the rest or disposing the device handle.
+        try:
+            for interface in reversed(self.claimed):
+                try:
+                    usb.util.release_interface(self.dev, interface)
+                except usb.core.USBError:
+                    pass
+            self.claimed = []
+            for interface in self.detached:
+                try:
+                    self.dev.attach_kernel_driver(interface)
+                except (usb.core.USBError, NotImplementedError):
+                    pass
+            self.detached = []
+        finally:
+            usb.util.dispose_resources(self.dev)
 
     def close(self) -> None:
         self._release()

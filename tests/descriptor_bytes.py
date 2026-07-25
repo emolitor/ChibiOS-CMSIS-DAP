@@ -7,6 +7,8 @@ descriptor inconsistencies (e.g. a wrong string bLength) that a token match
 misses, without a full ChibiOS host build.
 """
 
+import ast
+import operator
 import pathlib
 import re
 
@@ -52,16 +54,57 @@ def _symbols():
 SYMBOLS = _symbols()
 
 
+# Operators permitted in descriptor integer expressions.
+_BINOPS = {
+    ast.BitOr: operator.or_,
+    ast.BitAnd: operator.and_,
+    ast.BitXor: operator.xor,
+    ast.LShift: operator.lshift,
+    ast.RShift: operator.rshift,
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+}
+_UNARYOPS = {ast.UAdd: operator.pos, ast.USub: operator.neg, ast.Invert: operator.invert}
+
+
+def _eval_ast(node):
+    """Evaluate a whitelisted arithmetic AST node against the symbol table."""
+    if isinstance(node, ast.Expression):
+        return _eval_ast(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in SYMBOLS:
+            return SYMBOLS[node.id]
+        raise ValueError(f"unknown descriptor symbol: {node.id}")
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
+        return _BINOPS[type(node.op)](_eval_ast(node.left), _eval_ast(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARYOPS:
+        return _UNARYOPS[type(node.op)](_eval_ast(node.operand))
+    raise ValueError(f"unsupported expression element: {ast.dump(node)}")
+
+
 def _eval_expr(expr):
-    """Evaluate a C integer/char expression using the descriptor symbols."""
+    """Evaluate a C integer/char expression using the descriptor symbols.
+
+    Only integer/character literals, whitelisted operators, and the known
+    descriptor symbols are accepted; the expression is parsed and walked as an
+    AST rather than eval()'d, so no arbitrary code can run even if usbcfg.c is
+    malformed.
+    """
     expr = expr.strip()
     # Character literal, e.g. 'R' or ')'.
     m = re.fullmatch(r"'(\\?.)'", expr)
     if m:
         return ord(m.group(1).encode().decode("unicode_escape"))
-    # Strip integer suffixes (U/L) so Python can parse the literals.
+    # Strip integer suffixes (U/L) so Python's parser accepts the literals.
     normalized = re.sub(r"\b(0x[0-9A-Fa-f]+|\d+)[UuLl]+", r"\1", expr)
-    return int(eval(normalized, {"__builtins__": {}}, SYMBOLS)) & 0xFFFFFFFF
+    try:
+        tree = ast.parse(normalized, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"cannot parse expression {expr!r}") from exc
+    return int(_eval_ast(tree)) & 0xFFFFFFFF
 
 
 def _le(value, width):

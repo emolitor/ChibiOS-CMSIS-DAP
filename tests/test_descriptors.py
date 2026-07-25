@@ -65,14 +65,27 @@ def test_configuration_descriptor_bytes():
     assert kinds[CONFIGURATION] == 1
     assert kinds[INTERFACE] == 3               # DAP + CDC control + CDC data
     assert kinds[IAD] == 1
+    assert cfg[4] == len(interfaces) == 3      # bNumInterfaces
     assert interfaces == [0x00, 0x01, 0x02]
 
+    # Exactly the five expected endpoints, no duplicates (checked before the
+    # dict() below would silently collapse any).
+    dap, cdc_data, cdc_int = (
+        db.SYMBOLS["DAP_EP"],
+        db.SYMBOLS["CDC_DATA_EP"],
+        db.SYMBOLS["CDC_INT_EP"],
+    )
+    addresses = [addr for addr, _attr, _mps in endpoints]
+    assert len(addresses) == len(set(addresses)) == 5
+    assert set(addresses) == {
+        dap, dap | 0x80, cdc_data, cdc_data | 0x80, cdc_int | 0x80,
+    }
     eps = dict((addr, (attr, mps)) for addr, attr, mps in endpoints)
-    assert eps[db.SYMBOLS["DAP_EP"]] == (0x02, 0x40)          # bulk OUT 64
-    assert eps[db.SYMBOLS["DAP_EP"] | 0x80] == (0x02, 0x40)   # bulk IN 64
-    assert eps[db.SYMBOLS["CDC_DATA_EP"]] == (0x02, 0x40)     # bulk OUT
-    assert eps[db.SYMBOLS["CDC_DATA_EP"] | 0x80] == (0x02, 0x40)  # bulk IN
-    assert eps[db.SYMBOLS["CDC_INT_EP"] | 0x80][0] == 0x03    # interrupt IN
+    assert eps[dap] == (0x02, 0x40)            # bulk OUT 64
+    assert eps[dap | 0x80] == (0x02, 0x40)     # bulk IN 64
+    assert eps[cdc_data] == (0x02, 0x40)       # bulk OUT
+    assert eps[cdc_data | 0x80] == (0x02, 0x40)  # bulk IN
+    assert eps[cdc_int | 0x80][0] == 0x03      # interrupt IN
 
 
 def test_bos_and_ms_os_20_contract():

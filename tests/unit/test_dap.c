@@ -627,6 +627,33 @@ static void test_batch_with_unsupported_is_rejected(void) {
   CHECK(result.response_len == 1U && response[0] == DAP_ERROR);
 }
 
+/* The response header echoes the request command ID. On the device a
+ * committed QueueCommands batch reaches this path already rewritten to
+ * ExecuteCommands (0x7F); a QueueCommands passed to the API directly echoes
+ * 0x7E. Both are exercised here. */
+static void test_execute_response_id_echoes_request(void) {
+  dap_data_t dap;
+  uint8_t response[64];
+  const uint8_t execute[] = {DAP_CMD_EXECUTE_COMMANDS, 1U,
+                             DAP_CMD_INFO, DAP_INFO_PACKET_COUNT};
+  const uint8_t queue[] = {DAP_CMD_QUEUE_COMMANDS, 1U,
+                           DAP_CMD_INFO, DAP_INFO_PACKET_COUNT};
+  dap_process_result_t result;
+
+  reset_mocks();
+  dap_init(&dap);
+
+  result = process(&dap, execute, sizeof(execute), response, sizeof(response));
+  CHECK(result.status == DAP_PROCESS_RESPONSE);
+  CHECK(response[0] == DAP_CMD_EXECUTE_COMMANDS);
+  CHECK(response[1] == 1U);
+
+  result = process(&dap, queue, sizeof(queue), response, sizeof(response));
+  CHECK(result.status == DAP_PROCESS_RESPONSE);
+  CHECK(response[0] == DAP_CMD_QUEUE_COMMANDS);
+  CHECK(response[1] == 1U);
+}
+
 int main(void) {
   test_info_and_serial();
   test_connect_and_configuration();
@@ -639,6 +666,7 @@ int main(void) {
   test_transfer_shape_matches_dispatch();
   test_truncation_and_canaries();
   test_batch_with_unsupported_is_rejected();
+  test_execute_response_id_echoes_request();
   test_deterministic_packet_fuzz();
   test_deterministic_packet_fuzz_connected();
   puts("DAP unit tests passed");

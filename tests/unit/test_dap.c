@@ -568,6 +568,92 @@ static void test_deterministic_packet_fuzz(void) {
   }
 }
 
+/* Second fuzz pass with an SWD port connected and all transfers scripted to
+ * ACK OK, so the transfer/block/response-writing paths the disconnected pass
+ * skips are also exercised under the sanitizers. reset_mocks() runs each
+ * iteration to keep the per-transfer bookkeeping bounded. */
+static void test_deterministic_packet_fuzz_connected(void) {
+  dap_data_t dap;
+  uint8_t request[64];
+  uint8_t guarded[66];
+  uint32_t seed = 0x1234ABCDU;
+  unsigned iteration;
+
+  for (iteration = 0U; iteration < 20000U; iteration++) {
+    uint32_t len;
+    uint32_t i;
+
+    reset_mocks();
+    seed = seed * 1664525U + 1013904223U;
+    len = seed % 65U;
+    for (i = 0U; i < sizeof(request); i++) {
+      seed = seed * 1664525U + 1013904223U;
+      request[i] = (uint8_t)(seed >> 24);
+    }
+    dap_init(&dap);
+    dap.debug_port = DAP_PORT_SWD;
+    dap.retry_count = 0U;
+    dap.match_retry = 0U;
+    memset(guarded, 0x5A, sizeof(guarded));
+    (void)dap_process_command(&dap, request, len, &guarded[1], 64U);
+    CHECK(guarded[0] == 0x5AU && guarded[65] == 0x5AU);
+  }
+}
+
+/* A top-level unsupported command is answered with a one-byte error, but the
+ * same command nested in an atomic batch cannot be sized, so the batch is
+ * rejected as malformed rather than desyncing the parse of later commands. */
+static void test_batch_with_unsupported_is_rejected(void) {
+  dap_data_t dap;
+  uint8_t response[64];
+  const uint8_t top_level[] = {DAP_CMD_JTAG_SEQUENCE};
+  const uint8_t batch[] = {
+    DAP_CMD_EXECUTE_COMMANDS, 2U,
+    DAP_CMD_INFO, DAP_INFO_PACKET_COUNT,
+    DAP_CMD_JTAG_SEQUENCE
+  };
+  dap_process_result_t result;
+
+  reset_mocks();
+  dap_init(&dap);
+
+  result = process(&dap, top_level, sizeof(top_level),
+                   response, sizeof(response));
+  CHECK(result.status == DAP_PROCESS_RESPONSE);
+  CHECK(result.response_len == 1U && response[0] == DAP_ERROR);
+
+  result = process(&dap, batch, sizeof(batch), response, sizeof(response));
+  CHECK(result.status == DAP_PROCESS_MALFORMED);
+  CHECK(result.response_len == 1U && response[0] == DAP_ERROR);
+}
+
+/* The response header echoes the request command ID. On the device a
+ * committed QueueCommands batch reaches this path already rewritten to
+ * ExecuteCommands (0x7F); a QueueCommands passed to the API directly echoes
+ * 0x7E. Both are exercised here. */
+static void test_execute_response_id_echoes_request(void) {
+  dap_data_t dap;
+  uint8_t response[64];
+  const uint8_t execute[] = {DAP_CMD_EXECUTE_COMMANDS, 1U,
+                             DAP_CMD_INFO, DAP_INFO_PACKET_COUNT};
+  const uint8_t queue[] = {DAP_CMD_QUEUE_COMMANDS, 1U,
+                           DAP_CMD_INFO, DAP_INFO_PACKET_COUNT};
+  dap_process_result_t result;
+
+  reset_mocks();
+  dap_init(&dap);
+
+  result = process(&dap, execute, sizeof(execute), response, sizeof(response));
+  CHECK(result.status == DAP_PROCESS_RESPONSE);
+  CHECK(response[0] == DAP_CMD_EXECUTE_COMMANDS);
+  CHECK(response[1] == 1U);
+
+  result = process(&dap, queue, sizeof(queue), response, sizeof(response));
+  CHECK(result.status == DAP_PROCESS_RESPONSE);
+  CHECK(response[0] == DAP_CMD_QUEUE_COMMANDS);
+  CHECK(response[1] == 1U);
+}
+
 int main(void) {
   test_info_and_serial();
   test_connect_and_configuration();
@@ -579,7 +665,10 @@ int main(void) {
   test_execute_and_bounds();
   test_transfer_shape_matches_dispatch();
   test_truncation_and_canaries();
+  test_batch_with_unsupported_is_rejected();
+  test_execute_response_id_echoes_request();
   test_deterministic_packet_fuzz();
+  test_deterministic_packet_fuzz_connected();
   puts("DAP unit tests passed");
   return 0;
 }

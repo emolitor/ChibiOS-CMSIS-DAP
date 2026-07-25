@@ -203,6 +203,22 @@ typedef struct {
 
 void                 dap_init(dap_data_t *dap);
 void                 dap_set_serial(const char *serial);
+
+/*
+ * Process a single CMSIS-DAP command.
+ *
+ * Requires dap, request, and response to be non-NULL and response_capacity to
+ * be non-zero; on such API misuse it returns {DAP_PROCESS_MALFORMED, 0}
+ * without writing a response (there may be no buffer to write to). Given valid
+ * arguments it validates the command against request_len and
+ * response_capacity before dispatching, and a malformed or over-long command
+ * yields a one-byte DAP_ERROR response with DAP_PROCESS_MALFORMED status.
+ *
+ * The caller owns the dap->abort flag: it must be cleared before invoking
+ * this function for a new command (an in-progress transfer inspects it to
+ * bail out early). This function does not clear it, so a latched abort would
+ * otherwise make every subsequent transfer a no-op.
+ */
 dap_process_result_t dap_process_command(dap_data_t *dap,
                                          const uint8_t *request,
                                          uint32_t request_len,

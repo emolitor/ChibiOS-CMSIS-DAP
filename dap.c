@@ -978,8 +978,13 @@ static bool dap_command_shape(const uint8_t *req, uint32_t available,
     return true;
 
   default:
-    /* Unknown and unsupported commands have the standard one-byte error
-     * response and consume only the command byte. */
+    /* Unsupported (JTAG/SWO/UART) or unknown command. As a top-level
+     * command this is the standard one-byte DAP_ERROR response. Nested
+     * inside an atomic batch (allow_atomic == false) its request length
+     * cannot be derived, so refuse to size it — aborting the batch at this
+     * command rather than desyncing the parse of the commands that follow. */
+    if (!allow_atomic)
+      return false;
     shape->request_size = 1U;
     shape->response_size = 1U;
     return true;
@@ -994,13 +999,23 @@ static uint32_t dap_execute_commands(dap_data_t *dap, const uint8_t *req,
   uint32_t resp_offset = 2U;
   uint32_t n;
 
-  resp[0] = DAP_CMD_EXECUTE_COMMANDS;
-  resp[1] = (uint8_t)num;
+  /* Echo the request command ID, per the CMSIS-DAP convention that a response
+   * header repeats its command byte. For real traffic this is 0x7F: a direct
+   * ExecuteCommands carries 0x7F, and a committed QueueCommands batch also
+   * does, because DapThread rewrites its command byte to ExecuteCommands
+   * before dispatch. Only a QueueCommands passed to this API directly (which
+   * the firmware never does) echoes 0x7E. The count byte is written after the
+   * loop, once the number of processed commands is known. */
+  resp[0] = req[0];
 
   for (n = 0U; n < num; n++) {
     dap_command_shape_t shape;
     dap_process_result_t result;
 
+    /* Shape the nested command to advance the request/response offsets.
+     * dap_process_command() re-shapes it internally to re-validate against
+     * the remaining response capacity; the duplicate work is intentional
+     * and negligible at these packet sizes. */
     if (!dap_command_shape(&req[req_offset], req_len - req_offset,
                            false, &shape))
       break;

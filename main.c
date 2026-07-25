@@ -209,10 +209,19 @@ static void led_update(void) {
 static THD_WORKING_AREA(waDapThread, DAP_THREAD_WA_SIZE);
 static THD_FUNCTION(DapThread, arg) {
   (void)arg;
-  dap_packet_t *rx_pkt;
+  dap_packet_t *rx_pkt = NULL;
   dap_packet_t *tx_pkt = NULL;
   dap_packet_t *queued[DAP_PACKET_COUNT];
   uint32_t queued_count = 0U;
+  /* Deferred TransferAbort responses. An abort is handled on Core 0 and is
+   * never queued to the worker, so its response is injected into the outgoing
+   * stream at its request position: abort_at[k] is the running response count
+   * at which it must be sent (every worker response that precedes it). */
+  dap_packet_t *abort_pkt[DAP_PACKET_COUNT];
+  uint32_t abort_at[DAP_PACKET_COUNT];
+  uint32_t abort_head = 0U;
+  uint32_t abort_count = 0U;
+  uint32_t responses_sent = 0U;
 
   while (true) {
     /* Wait for USB active. */
@@ -220,65 +229,66 @@ static THD_FUNCTION(DapThread, arg) {
       chThdSleepMilliseconds(100);
 
     dap_transport_active = true;
+    rx_pkt = NULL;
+    responses_sent = 0U;
+    abort_head = 0U;
+    abort_count = 0U;
 
-    /* Allocate initial RX buffer and arm USB OUT. */
-    rx_pkt = chFifoTakeObjectTimeout(&cmd_fifo, TIME_INFINITE);
-    chSysLock();
-    usbStartReceiveI(&USBD1, DAP_EP, rx_pkt->cmd, DAP_PACKET_SIZE);
-    chSysUnlock();
+    /* Arm OUT immediately (the pool is full at connection start) so the first
+     * request is serviced without waiting out an event-loop timeout. */
+    rx_pkt = chFifoTakeObjectTimeout(&cmd_fifo, TIME_IMMEDIATE);
+    if (rx_pkt != NULL) {
+      chSysLock();
+      usbStartReceiveI(&USBD1, DAP_EP, rx_pkt->cmd, DAP_PACKET_SIZE);
+      chSysUnlock();
+    }
 
     while (USBD1.state == USB_ACTIVE) {
       eventmask_t events = chEvtWaitAnyTimeout(
           EVT_DAP_RX_DONE | EVT_DAP_TX_DONE | EVT_DAP_RESP_READY,
           TIME_MS2I(100));
 
-      /* Free completed TX buffer. */
+      /* Free a completed TX buffer. */
       if ((events & EVT_DAP_TX_DONE) && (tx_pkt != NULL)) {
         chFifoReturnObject(&cmd_fifo, tx_pkt);
         tx_pkt = NULL;
       }
 
-      /* Process received command. */
-      if (events & EVT_DAP_RX_DONE) {
-        bool had_queued;
+      /* Process a received command (rx_pkt was armed and is now filled). */
+      if ((events & EVT_DAP_RX_DONE) && (rx_pkt != NULL)) {
+        uint32_t i;
 
         rx_pkt->cmd_len = dap_rx_len;
 
         if ((rx_pkt->cmd_len > 0U) &&
-            (rx_pkt->cmd[0] == DAP_CMD_QUEUE_COMMANDS)) {
-          if (queued_count < DAP_PACKET_COUNT) {
-            /*
-             * DAP_QueueCommands has no immediate response. Keep ownership
-             * of the packet until the first following non-queue command.
-             */
-            queued[queued_count++] = rx_pkt;
-          }
-          else {
-            uint32_t i;
-
-            /*
-             * A host exceeded the advertised packet count. Discard the
-             * incomplete atomic batch and return a standard error response.
-             */
-            for (i = 0U; i < queued_count; i++)
-              chFifoReturnObject(&cmd_fifo, queued[i]);
-            queued_count = 0U;
-            rx_pkt->cmd[0] = DAP_ERROR;
-            rx_pkt->cmd_len = 1U;
-            chFifoSendObject(&cmd_fifo, rx_pkt);
-            inflight++;
-          }
+            (rx_pkt->cmd[0] == DAP_CMD_QUEUE_COMMANDS) &&
+            (queued_count < DAP_PACKET_COUNT)) {
+          /* DAP_QueueCommands has no immediate response. Keep ownership of
+           * the packet until the first following non-queue command. */
+          queued[queued_count++] = rx_pkt;
         }
         else {
-          uint32_t i;
+          bool is_abort = (rx_pkt->cmd_len > 0U) &&
+                          (rx_pkt->cmd[0] == DAP_CMD_TRANSFER_ABORT);
+          bool overflow = (rx_pkt->cmd_len > 0U) &&
+                          (rx_pkt->cmd[0] == DAP_CMD_QUEUE_COMMANDS);
 
-          had_queued = queued_count > 0U;
+          /* An abort interrupts the transfer currently executing on the
+           * worker: a stuck transfer polls dap_state.abort and bails. Queued
+           * commands committed alongside still execute so the host receives a
+           * response for each — matching TransferAbort's "abort the current
+           * transfer" semantics rather than dropping the batch and desyncing
+           * the host's response count. */
+          if (is_abort) {
+            dap_state.abort = 1U;
+            __DSB();
+          }
 
-          /*
-           * A non-queue packet commits the atomic batch. Transform each
-           * retained packet into ExecuteCommands so responses use command
-           * ID 0x7F, then submit them ahead of the triggering command.
-           */
+          /* A non-queue packet — or a QueueCommands that overflowed the pool
+           * — commits the atomic batch. Transform each retained packet into
+           * ExecuteCommands (response ID 0x7F) and submit it ahead of the
+           * triggering command. Committing on overflow, rather than
+           * discarding, keeps a response flowing for every packet sent. */
           for (i = 0U; i < queued_count; i++) {
             queued[i]->cmd[0] = DAP_CMD_EXECUTE_COMMANDS;
             chFifoSendObject(&cmd_fifo, queued[i]);
@@ -286,84 +296,78 @@ static THD_FUNCTION(DapThread, arg) {
           }
           queued_count = 0U;
 
-          if ((rx_pkt->cmd_len > 0U) &&
-              (rx_pkt->cmd[0] == DAP_CMD_TRANSFER_ABORT) &&
-              !had_queued) {
-            /* Handle abort locally — must not queue to the worker thread. */
-            dap_state.abort = 1U;
-            __DSB();
-
-            /* Wait for in-flight TX to complete. */
-            if (tx_pkt != NULL) {
-              while ((USBD1.state == USB_ACTIVE) &&
-                     ((chEvtWaitAnyTimeout(EVT_DAP_TX_DONE, TIME_MS2I(100)) &
-                       EVT_DAP_TX_DONE) == 0U)) {
-              }
-              chFifoReturnObject(&cmd_fifo, tx_pkt);
-              tx_pkt = NULL;
-            }
-
-            /* Drain all in-flight responses before sending abort response.
-             * Host expects responses in order: aborted command(s) first,
-             * then abort response last. */
-            while (inflight > 0U && USBD1.state == USB_ACTIVE) {
-              msg_t msg;
-              if (chMBFetchTimeout(&resp_mbox, &msg,
-                                   TIME_MS2I(200)) == MSG_OK) {
-                dap_packet_t *pkt = (dap_packet_t *)msg;
-                inflight--;
-                chSysLock();
-                usbStartTransmitI(&USBD1, DAP_EP, pkt->resp, pkt->resp_len);
-                chSysUnlock();
-                while ((USBD1.state == USB_ACTIVE) &&
-                       ((chEvtWaitAnyTimeout(EVT_DAP_TX_DONE,
-                                             TIME_MS2I(100)) &
-                         EVT_DAP_TX_DONE) == 0U)) {
-                }
-                chFifoReturnObject(&cmd_fifo, pkt);
-              }
-              else {
-                break;
-              }
-            }
-
-            /* Send abort response last. */
+          if (is_abort && (abort_count < DAP_PACKET_COUNT)) {
+            /* Defer the abort response to its request position: it is sent
+             * once responses_sent reaches the number of responses that
+             * precede it (everything committed above plus anything already in
+             * flight). This keeps the outgoing stream ordered without a
+             * synchronous drain. */
+            uint32_t slot = (abort_head + abort_count) % DAP_PACKET_COUNT;
             rx_pkt->resp[0] = DAP_CMD_TRANSFER_ABORT;
             rx_pkt->resp[1] = DAP_OK;
-            chSysLock();
-            usbStartTransmitI(&USBD1, DAP_EP, rx_pkt->resp, 2U);
-            chSysUnlock();
-            tx_pkt = rx_pkt;
+            abort_pkt[slot] = rx_pkt;
+            abort_at[slot] = responses_sent + inflight;
+            abort_count++;
+          }
+          else if (overflow) {
+            /* Reject the overflowing packet with a one-byte error; the batch
+             * it could not join was committed above. */
+            rx_pkt->cmd[0] = DAP_ERROR;
+            rx_pkt->cmd_len = 1U;
+            chFifoSendObject(&cmd_fifo, rx_pkt);
+            inflight++;
           }
           else {
-            /* Send command to the worker thread via object FIFO. */
             chFifoSendObject(&cmd_fifo, rx_pkt);
             inflight++;
           }
         }
 
-        /* Allocate next RX buffer and re-arm USB OUT. */
-        rx_pkt = chFifoTakeObjectTimeout(&cmd_fifo, TIME_INFINITE);
-        chSysLock();
-        usbStartReceiveI(&USBD1, DAP_EP, rx_pkt->cmd, DAP_PACKET_SIZE);
-        chSysUnlock();
+        rx_pkt = NULL;  /* Consumed; re-armed below once a buffer is free. */
       }
 
-      /* Start TX if idle and response available. */
+      /* Transmit the next outgoing packet when the endpoint is idle. Worker
+       * responses drain in FIFO (request) order; a deferred abort response is
+       * emitted exactly when every response preceding it has been sent. */
       if (tx_pkt == NULL) {
         msg_t msg;
-        if (chMBFetchTimeout(&resp_mbox, &msg, TIME_IMMEDIATE) == MSG_OK) {
+        if ((abort_count > 0U) && (abort_at[abort_head] <= responses_sent)) {
+          dap_packet_t *ap = abort_pkt[abort_head];
+          abort_head = (abort_head + 1U) % DAP_PACKET_COUNT;
+          abort_count--;
+          chSysLock();
+          usbStartTransmitI(&USBD1, DAP_EP, ap->resp, 2U);
+          chSysUnlock();
+          tx_pkt = ap;
+        }
+        else if (chMBFetchTimeout(&resp_mbox, &msg,
+                                  TIME_IMMEDIATE) == MSG_OK) {
           dap_packet_t *pkt = (dap_packet_t *)msg;
-          inflight--;
+          if (inflight > 0U)
+            inflight--;
+          responses_sent++;
           chSysLock();
           usbStartTransmitI(&USBD1, DAP_EP, pkt->resp, pkt->resp_len);
           chSysUnlock();
           tx_pkt = pkt;
         }
       }
+
+      /* Re-arm USB OUT when unarmed and a buffer is available. If the pool is
+       * momentarily exhausted the endpoint stays unarmed and the host is
+       * NAKed (flow control) until a response drains and frees a buffer — the
+       * thread never blocks, so it always observes USB teardown. */
+      if (rx_pkt == NULL) {
+        rx_pkt = chFifoTakeObjectTimeout(&cmd_fifo, TIME_IMMEDIATE);
+        if (rx_pkt != NULL) {
+          chSysLock();
+          usbStartReceiveI(&USBD1, DAP_EP, rx_pkt->cmd, DAP_PACKET_SIZE);
+          chSysUnlock();
+        }
+      }
     }
 
-    /* USB disconnected — drain any leaked responses and return buffers. */
+    /* USB disconnected — drain in-flight work and return every buffer. */
     {
       msg_t msg;
       uint32_t i;
@@ -373,11 +377,7 @@ static THD_FUNCTION(DapThread, arg) {
       dap_state.abort = 1U;
       __DSB();
 
-      /*
-       * Reclaim commands the worker has not fetched. At most one command is
-       * executing; it observes abort or the inactive transport and produces
-       * a final response below.
-       */
+      /* Reclaim commands the worker has not fetched. */
       while (chFifoReceiveObjectTimeout(&cmd_fifo, &objp,
                                         TIME_IMMEDIATE) == MSG_OK) {
         chFifoReturnObject(&cmd_fifo, objp);
@@ -391,6 +391,7 @@ static THD_FUNCTION(DapThread, arg) {
           inflight--;
       }
 
+      /* At most one command was executing; wait for its final response. */
       while (inflight > 0U) {
         if (chMBFetchTimeout(&resp_mbox, &msg,
                              TIME_INFINITE) == MSG_OK) {
@@ -402,9 +403,18 @@ static THD_FUNCTION(DapThread, arg) {
       for (i = 0U; i < queued_count; i++)
         chFifoReturnObject(&cmd_fifo, queued[i]);
       queued_count = 0U;
+
+      while (abort_count > 0U) {
+        chFifoReturnObject(&cmd_fifo, abort_pkt[abort_head]);
+        abort_head = (abort_head + 1U) % DAP_PACKET_COUNT;
+        abort_count--;
+      }
       inflight = 0U;
     }
-    chFifoReturnObject(&cmd_fifo, rx_pkt);
+    if (rx_pkt != NULL) {
+      chFifoReturnObject(&cmd_fifo, rx_pkt);
+      rx_pkt = NULL;
+    }
     if (tx_pkt != NULL) {
       chFifoReturnObject(&cmd_fifo, tx_pkt);
       tx_pkt = NULL;

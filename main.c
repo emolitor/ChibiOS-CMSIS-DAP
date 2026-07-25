@@ -296,18 +296,30 @@ static THD_FUNCTION(DapThread, arg) {
           }
           queued_count = 0U;
 
-          if (is_abort && (abort_count < DAP_PACKET_COUNT)) {
-            /* Defer the abort response to its request position: it is sent
-             * once responses_sent reaches the number of responses that
-             * precede it (everything committed above plus anything already in
-             * flight). This keeps the outgoing stream ordered without a
-             * synchronous drain. */
-            uint32_t slot = (abort_head + abort_count) % DAP_PACKET_COUNT;
-            rx_pkt->resp[0] = DAP_CMD_TRANSFER_ABORT;
-            rx_pkt->resp[1] = DAP_OK;
-            abort_pkt[slot] = rx_pkt;
-            abort_at[slot] = responses_sent + inflight;
-            abort_count++;
+          if (is_abort) {
+            if (abort_count < DAP_PACKET_COUNT) {
+              /* Defer the abort response to its request position: it is sent
+               * once responses_sent reaches the number of responses that
+               * precede it (everything committed above plus anything already
+               * in flight). This keeps the outgoing stream ordered without a
+               * synchronous drain. */
+              uint32_t slot = (abort_head + abort_count) % DAP_PACKET_COUNT;
+              rx_pkt->resp[0] = DAP_CMD_TRANSFER_ABORT;
+              rx_pkt->resp[1] = DAP_OK;
+              abort_pkt[slot] = rx_pkt;
+              abort_at[slot] = responses_sent + inflight;
+              abort_count++;
+            }
+            else {
+              /* Pathological: more un-emitted aborts than the pool can hold.
+               * dap_state.abort is already raised, so its interrupt effect
+               * stands; reject this packet with a one-byte error rather than
+               * ever sending a raw abort to the worker thread. */
+              rx_pkt->cmd[0] = DAP_ERROR;
+              rx_pkt->cmd_len = 1U;
+              chFifoSendObject(&cmd_fifo, rx_pkt);
+              inflight++;
+            }
           }
           else if (overflow) {
             /* Reject the overflowing packet with a one-byte error; the batch

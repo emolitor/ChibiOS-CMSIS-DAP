@@ -306,7 +306,8 @@ else
 	  if test -n "$$reverted"; then \
 	    echo "Update failed; restoring compatibility patch(es)"; \
 	    for patch in $(CHIBIOS_PATCHES); do \
-	      git -C $(CHIBIOS) apply "$$patch" || true; \
+	      git -C $(CHIBIOS) apply "$$patch" || \
+	        echo "Warning: could not restore $$(basename "$$patch"); $(CHIBIOS) may be left unpatched — rerun 'make chibios'"; \
 	    done; \
 	  fi; \
 	  exit $$status; \

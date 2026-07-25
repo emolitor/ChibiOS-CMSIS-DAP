@@ -1,0 +1,48 @@
+diff --git a/os/hal/ports/RP/RP2040/hal_lld.c b/os/hal/ports/RP/RP2040/hal_lld.c
+index 02388b998..beb69842d 100644
+--- a/os/hal/ports/RP/RP2040/hal_lld.c
++++ b/os/hal/ports/RP/RP2040/hal_lld.c
+@@ -72,12 +72,15 @@ static void start_core1(void) {
+    *
+    * PSM FRCE_OFF holds core1 in reset (powered-off state).  Clearing it
+    * releases core1 into the ROM boot-path which immediately enters the
+-   * wait-for-launch loop.  The PSM DONE bit falls while the core is held
+-   * off, and rises again once it has been released and is running.*/
++   * wait-for-launch loop.*/
+   PSM->SET.FRCE_OFF = PSM_ANY_PROC1;         /* assert reset to core1      */
+-  while (PSM->DONE & PSM_ANY_PROC1) {}       /* wait until it powers off   */
++  while ((PSM->FRCE_OFF & PSM_ANY_PROC1) == 0U) {} /* wait for APB write    */
+   PSM->CLR.FRCE_OFF = PSM_ANY_PROC1;         /* release — core1 enters ROM */
+-
++
++  /* Consume the boot ROM's reset notification before starting the launch
++     handshake. The ROM drains its FIFO and pushes zero after reset. */
++  (void)fifoBlockingRead();
++
+   /* Starting core 1.*/
+   seq = 0;
+   do {
+diff --git a/os/hal/ports/RP/RP2350/hal_lld.c b/os/hal/ports/RP/RP2350/hal_lld.c
+index 1825c4716..208bf5a8e 100644
+--- a/os/hal/ports/RP/RP2350/hal_lld.c
++++ b/os/hal/ports/RP/RP2350/hal_lld.c
+@@ -71,12 +71,15 @@ static void start_core1(void) {
+    *
+    * PSM FRCE_OFF holds core1 in reset (powered-off state).  Clearing it
+    * releases core1 into the ROM boot-path which immediately enters the
+-   * wait-for-launch loop.  The PSM DONE bit falls while the core is held
+-   * off, and rises again once it has been released and is running.*/
++   * wait-for-launch loop.*/
+   PSM->SET.FRCE_OFF = PSM_ANY_PROC1;         /* assert reset to core1      */
+-  while (PSM->DONE & PSM_ANY_PROC1) {}       /* wait until it powers off   */
++  while ((PSM->FRCE_OFF & PSM_ANY_PROC1) == 0U) {} /* wait for APB write    */
+   PSM->CLR.FRCE_OFF = PSM_ANY_PROC1;         /* release — core1 enters ROM */
+-
++
++  /* Consume the boot ROM's reset notification before starting the launch
++     handshake. The ROM drains its FIFO and pushes zero after reset. */
++  (void)fifoBlockingRead();
++
+   /* Starting core 1.*/
+   seq = 0;
+   do {

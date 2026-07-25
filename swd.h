@@ -23,6 +23,8 @@
 #ifndef SWD_H
 #define SWD_H
 
+#include <stdbool.h>
+
 #include "hal.h"
 
 /*===========================================================================*/
@@ -66,7 +68,7 @@
 /* Function prototypes.                                                      */
 /*===========================================================================*/
 
-void swd_init(uint32_t clk_div);
+bool swd_init(uint32_t clk_div);
 void swd_set_clkdiv(uint32_t clk_div);
 void swd_off(void);
 uint8_t swd_transfer(uint32_t request, uint32_t *data,

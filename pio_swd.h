@@ -109,58 +109,40 @@ static inline uint32_t pio_swd_cmd(uint32_t bit_count, bool out_en,
  * @param[in] pin_swdio    GPIO number for SWDIO
  */
 static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
-                                 uint32_t pin_swclk, uint32_t pin_swdio) {
-  /* Disable state machine for (re)configuration. */
-  pioSmDisableX(smp);
+                                 uint32_t pin_swclk, uint32_t pin_swdio,
+                                 uint32_t clk_div) {
+  rp_pio_sm_config_t cfg;
+  uint32_t rel_swclk = pioGpioToRel(smp->block, pin_swclk);
+  uint32_t rel_swdio = pioGpioToRel(smp->block, pin_swdio);
 
-  /* PINCTRL: side-set on SWCLK, OUT/IN/SET on SWDIO. */
-  uint32_t pinctrl =
-    (pin_swdio << PIO_SM_PINCTRL_OUT_BASE_Pos) |
-    (pin_swdio << PIO_SM_PINCTRL_SET_BASE_Pos) |
-    (pin_swclk << PIO_SM_PINCTRL_SIDESET_BASE_Pos) |
-    (pin_swdio << PIO_SM_PINCTRL_IN_BASE_Pos) |
-    (1U << PIO_SM_PINCTRL_OUT_COUNT_Pos) |   /* 1 OUT pin (SWDIO) */
-    (1U << PIO_SM_PINCTRL_SET_COUNT_Pos) |   /* 1 SET pin (SWDIO) */
-    (2U << PIO_SM_PINCTRL_SIDESET_COUNT_Pos); /* 2 side-set bits (1 pin + enable) */
-  pioSmSetPinctrlX(smp, pinctrl);
+  /*
+   * Use the current PIO LLD's complete initialization path. In addition to
+   * applying the register images this clears debug/FIFO state and restarts
+   * the state machine and divider, which is required when reconnecting
+   * after a previous program has been unloaded.
+   */
+  pioSmConfigDefaultX(&cfg);
+  pioSmConfigSetWrapX(&cfg,
+                      prog_offset + PIO_SWD_WRAP_TARGET,
+                      prog_offset + PIO_SWD_WRAP);
+  pioSmConfigSetSidesetX(&cfg, 2U, true, false);
+  pioSmConfigSetSidesetPinsX(&cfg, rel_swclk);
+  pioSmConfigSetOutPinsX(&cfg, rel_swdio, 1U);
+  pioSmConfigSetSetPinsX(&cfg, rel_swdio, 1U);
+  pioSmConfigSetInPinsX(&cfg, rel_swdio);
+  if (clk_div == 0x1000000U)
+    pioSmConfigSetClkdivX(&cfg, 0U, 0U); /* Integer zero encodes 65536. */
+  else
+    pioSmConfigSetClkdivX(&cfg, clk_div >> 8, clk_div & 0xFFU);
+  pioSmInit(smp, prog_offset + PIO_SWD_OFFSET_GET_NEXT_CMD, &cfg);
 
-  /* EXECCTRL: wrap range, side-set enable bit. */
-  pioSmSetExecctrlX(smp,
-    PIO_SM_EXECCTRL_WRAP(prog_offset + PIO_SWD_WRAP_TARGET,
-                          prog_offset + PIO_SWD_WRAP) |
-    PIO_SM_EXECCTRL_SIDE_EN);
-
-  /* SHIFTCTRL: shift right (LSB first), no auto push/pull. */
-  pioSmSetShiftctrlX(smp,
-    PIO_SM_SHIFTCTRL_IN_SHIFTDIR |
-    PIO_SM_SHIFTCTRL_OUT_SHIFTDIR);
-
-  /* Force-set pin directions and initial values.
-   * Side-set controls SWCLK value but NOT output enable.
-   * Must use set pindirs to enable output on both pins. */
-
-  /* SWCLK: output enabled, initial value high. */
-  pioSmSetPinctrlX(smp,
-    (1U << PIO_SM_PINCTRL_SET_COUNT_Pos) |
-    (pin_swclk << PIO_SM_PINCTRL_SET_BASE_Pos));
-  pioSmExecX(smp, 0xE081U);  /* set pindirs, 1 */
-  pioSmExecX(smp, 0xE001U);  /* set pins, 1 */
-
-  /* SWDIO: output enabled, initial value high. */
-  pioSmSetPinctrlX(smp,
-    (1U << PIO_SM_PINCTRL_SET_COUNT_Pos) |
-    (pin_swdio << PIO_SM_PINCTRL_SET_BASE_Pos));
-  pioSmExecX(smp, 0xE081U);  /* set pindirs, 1 */
-  pioSmExecX(smp, 0xE001U);  /* set pins, 1 */
-
-  /* Restore PINCTRL. */
-  pioSmSetPinctrlX(smp, pinctrl);
-
-  /* Set initial PC to get_next_cmd (command dispatch). */
-  pioSmSetPCX(smp, prog_offset + PIO_SWD_OFFSET_GET_NEXT_CMD);
-
-  /* Clear FIFOs. */
-  pioSmClearFifosX(smp);
+  /* Route pads after the SM has been initialized, then enable both outputs. */
+  pioGpioInitPadX(smp, pin_swclk,
+                  RP_PIO_PAD_DEFAULT | RP_PIO_PAD_SLEWFAST);
+  pioGpioInitPadX(smp, pin_swdio,
+                  RP_PIO_PAD_DEFAULT | RP_PIO_PAD_PUE |
+                  RP_PIO_PAD_SLEWFAST);
+  pioSmSetConsecutivePindirsX(smp, pin_swclk, 2U, true);
 
   /* Enable state machine. */
   pioSmEnableX(smp);

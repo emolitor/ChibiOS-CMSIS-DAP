@@ -204,9 +204,14 @@ static uint32_t dap_connect(dap_data_t *dap, const uint8_t *req,
   resp[0] = DAP_CMD_CONNECT;
 
   if (port == DAP_PORT_DEFAULT || port == DAP_PORT_SWD) {
-    swd_init(dap->clk_div);
-    dap->debug_port = DAP_PORT_SWD;
-    resp[1] = DAP_PORT_SWD;
+    if (swd_init(dap->clk_div)) {
+      dap->debug_port = DAP_PORT_SWD;
+      resp[1] = DAP_PORT_SWD;
+    }
+    else {
+      dap->debug_port = 0U;
+      resp[1] = 0U;
+    }
   }
   else {
     /* JTAG not supported. */

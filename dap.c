@@ -271,7 +271,11 @@ static uint32_t dap_transfer(dap_data_t *dap, const uint8_t *req,
 
   resp[0] = DAP_CMD_TRANSFER;
 
-  dap->abort = 0U;
+  if (dap->debug_port != DAP_PORT_SWD) {
+    resp[1] = 0U;
+    resp[2] = 0U;
+    return 3U;
+  }
 
   for (n = 0; n < req_count; n++) {
     request = req[req_idx++];
@@ -441,7 +445,8 @@ static uint32_t dap_transfer_block(dap_data_t *dap, const uint8_t *req,
 
   resp[0] = DAP_CMD_TRANSFER_BLOCK;
 
-  dap->abort = 0U;
+  if (dap->debug_port != DAP_PORT_SWD)
+    goto block_done;
 
   if (count == 0U)
     goto block_done;
@@ -516,6 +521,11 @@ static uint32_t dap_write_abort(dap_data_t *dap, const uint8_t *req,
   uint8_t ack;
 
   resp[0] = DAP_CMD_WRITE_ABORT;
+
+  if (dap->debug_port != DAP_PORT_SWD) {
+    resp[1] = DAP_ERROR;
+    return 2U;
+  }
 
   data = get_le32(&req[2]);
   ack = swd_retry(dap, swd_request_byte(0U), &data);
@@ -610,6 +620,7 @@ static uint32_t dap_swj_pins(const uint8_t *req, uint8_t *resp) {
 static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
                                uint8_t *resp) {
   uint32_t clock = get_le32(&req[1]);
+  uint64_t clkdiv_256;
 
   resp[0] = DAP_CMD_SWJ_CLOCK;
 
@@ -624,12 +635,16 @@ static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
    * PIO SM runs at sys_clk / clkdiv, each SWCLK period = 4 PIO cycles.
    * clkdiv = sys_clk / (4 * target_freq).
    * Minimum clkdiv = 1.0 (encoded as 0x100). */
-  uint32_t clkdiv_256 = (uint32_t)((uint64_t)RP_CLK_SYS_FREQ * 64U / clock);
+  /* Round the divider up so the generated SWCLK never exceeds the host's
+   * requested frequency. */
+  clkdiv_256 = ((uint64_t)RP_CLK_SYS_FREQ * 64U + clock - 1U) / clock;
   if (clkdiv_256 < 0x100U)
     clkdiv_256 = 0x100U;  /* Minimum 1.0 */
-  dap->clk_div = clkdiv_256;
+  else if (clkdiv_256 > 0x1000000U)
+    clkdiv_256 = 0x1000000U;  /* Maximum 65536.0 */
+  dap->clk_div = (uint32_t)clkdiv_256;
   if (dap->debug_port == DAP_PORT_SWD)
-    swd_set_clkdiv(clkdiv_256);
+    swd_set_clkdiv((uint32_t)clkdiv_256);
 
   resp[1] = DAP_OK;
   return 2U;
@@ -732,101 +747,275 @@ static uint32_t dap_reset_target(uint8_t *resp) {
 /*===========================================================================*/
 
 /**
- * @brief   Compute request consumption (bytes) for an embedded command.
+ * @brief   Validated command shape.
  */
-static uint32_t dap_request_size(const uint8_t *req) {
-  uint32_t idx;
-  uint32_t n, count, info, bytes;
+typedef struct {
+  uint32_t request_size;
+  uint32_t response_size;
+} dap_command_shape_t;
+
+static bool checked_add_u32(uint32_t a, uint32_t b, uint32_t *result) {
+  if (a > UINT32_MAX - b)
+    return false;
+  *result = a + b;
+  return true;
+}
+
+static bool checked_mul_u32(uint32_t a, uint32_t b, uint32_t *result) {
+  if ((a != 0U) && (b > UINT32_MAX / a))
+    return false;
+  *result = a * b;
+  return true;
+}
+
+static bool dap_command_shape(const uint8_t *req, uint32_t available,
+                              bool allow_atomic,
+                              dap_command_shape_t *shape) {
+  uint32_t idx, response_size;
+  uint32_t n, count, info, bytes, data_size;
+
+  if ((req == NULL) || (shape == NULL) || (available == 0U))
+    return false;
 
   switch (req[0]) {
   case DAP_CMD_DISCONNECT:
   case DAP_CMD_TRANSFER_ABORT:
   case DAP_CMD_RESET_TARGET:
-    return 1U;
+    shape->request_size = 1U;
+    shape->response_size = (req[0] == DAP_CMD_RESET_TARGET) ? 3U : 2U;
+    return true;
+
   case DAP_CMD_INFO:
   case DAP_CMD_CONNECT:
   case DAP_CMD_SWD_CONFIGURE:
-    return 2U;
+    if (available < 2U)
+      return false;
+    shape->request_size = 2U;
+    if (req[0] == DAP_CMD_INFO) {
+      switch (req[1]) {
+      case DAP_INFO_VENDOR:
+        shape->response_size = 2U + (uint32_t)sizeof(dap_vendor);
+        break;
+      case DAP_INFO_PRODUCT:
+        shape->response_size = 2U + (uint32_t)sizeof(dap_product);
+        break;
+      case DAP_INFO_SER_NUM:
+        shape->response_size = 2U + (uint32_t)strlen(dap_serial) + 1U;
+        break;
+      case DAP_INFO_CMSIS_DAP_VER:
+        shape->response_size = 2U + (uint32_t)sizeof(dap_cmsis_ver);
+        break;
+      case DAP_INFO_FW_VER:
+        shape->response_size = 2U + (uint32_t)sizeof(dap_fw_ver);
+        break;
+      case DAP_INFO_CAPABILITIES:
+      case DAP_INFO_PACKET_SIZE:
+        shape->response_size = 4U;
+        break;
+      case DAP_INFO_TEST_DOMAIN_TIMER:
+        shape->response_size = 6U;
+        break;
+      case DAP_INFO_PACKET_COUNT:
+        shape->response_size = 3U;
+        break;
+      default:
+        shape->response_size = 2U;
+        break;
+      }
+    }
+    else {
+      shape->response_size = 2U;
+    }
+    return true;
+
   case DAP_CMD_HOST_STATUS:
   case DAP_CMD_DELAY:
-    return 3U;
+    if (available < 3U)
+      return false;
+    shape->request_size = 3U;
+    shape->response_size = 2U;
+    return true;
+
   case DAP_CMD_SWJ_CLOCK:
-    return 5U;
+    if (available < 5U)
+      return false;
+    shape->request_size = 5U;
+    shape->response_size = 2U;
+    return true;
+
   case DAP_CMD_TRANSFER_CONFIGURE:
   case DAP_CMD_WRITE_ABORT:
-    return 6U;
+    if (available < 6U)
+      return false;
+    shape->request_size = 6U;
+    shape->response_size = 2U;
+    return true;
+
   case DAP_CMD_SWJ_PINS:
-    return 7U;
+    if (available < 7U)
+      return false;
+    shape->request_size = 7U;
+    shape->response_size = 2U;
+    return true;
 
   case DAP_CMD_SWJ_SEQUENCE:
+    if (available < 2U)
+      return false;
     count = req[1];
     if (count == 0U)
       count = 256U;
-    return 2U + ((count + 7U) >> 3);
+    bytes = (count + 7U) >> 3;
+    if ((available - 2U) < bytes)
+      return false;
+    shape->request_size = 2U + bytes;
+    shape->response_size = 2U;
+    return true;
 
   case DAP_CMD_SWD_SEQUENCE:
+    if (available < 2U)
+      return false;
     idx = 2U;
+    response_size = 2U;
     for (n = 0U; n < req[1]; n++) {
+      if (idx >= available)
+        return false;
       info = req[idx++];
       count = info & 0x3FU;
       if (count == 0U)
         count = 64U;
       bytes = (count + 7U) >> 3;
-      if (!(info & 0x80U))
+      if ((info & 0x80U) != 0U) {
+        if (!checked_add_u32(response_size, bytes, &response_size))
+          return false;
+      }
+      else {
+        if ((available - idx) < bytes)
+          return false;
         idx += bytes;  /* Output: request carries data. */
+      }
     }
-    return idx;
+    shape->request_size = idx;
+    shape->response_size = response_size;
+    return true;
 
   case DAP_CMD_TRANSFER:
     /* cmd + dap_index + count, then per-transfer: request_byte [+ data]. */
+    if (available < 3U)
+      return false;
     idx = 3U;
+    response_size = 3U;
     for (n = 0U; n < req[2]; n++) {
-      uint32_t request = req[idx++];
-      if (request & DAP_TRANSFER_MATCH_MASK) {
-        idx += 4U;
-      }
-      else if (request & DAP_TRANSFER_RnW) {
-        if (request & DAP_TRANSFER_MATCH_VALUE)
+      uint32_t request;
+
+      if (idx >= available)
+        return false;
+      request = req[idx++];
+      /*
+       * Match flags are interpreted in the same direction-dependent order
+       * as dap_transfer(): MATCH_VALUE only alters reads, MATCH_MASK only
+       * alters writes. This also keeps reserved flag combinations bounded
+       * and internally consistent.
+       */
+      if (request & DAP_TRANSFER_RnW) {
+        if (request & DAP_TRANSFER_MATCH_VALUE) {
+          if ((available - idx) < 4U)
+            return false;
           idx += 4U;
+        }
+        else if (!checked_add_u32(response_size, 4U, &response_size)) {
+          return false;
+        }
       }
       else {
+        if ((available - idx) < 4U)
+          return false;
         idx += 4U;  /* Write data. */
       }
     }
-    return idx;
+    shape->request_size = idx;
+    shape->response_size = response_size;
+    return true;
 
   case DAP_CMD_TRANSFER_BLOCK:
     /* cmd + dap_index + count(2) + request. */
+    if (available < 5U)
+      return false;
     count = (uint32_t)req[2] | ((uint32_t)req[3] << 8);
-    if (req[4] & DAP_TRANSFER_RnW)
-      return 5U;  /* Read: no data in request. */
-    return 5U + count * 4U;
+    if (!checked_mul_u32(count, 4U, &data_size))
+      return false;
+    if (req[4] & DAP_TRANSFER_RnW) {
+      if (!checked_add_u32(4U, data_size, &response_size))
+        return false;
+      shape->request_size = 5U;
+      shape->response_size = response_size;
+    }
+    else {
+      if ((available - 5U) < data_size)
+        return false;
+      shape->request_size = 5U + data_size;
+      shape->response_size = 4U;
+    }
+    return true;
+
+  case DAP_CMD_QUEUE_COMMANDS:
+  case DAP_CMD_EXECUTE_COMMANDS:
+    if (!allow_atomic || (available < 2U))
+      return false;
+    idx = 2U;
+    response_size = 2U;
+    for (n = 0U; n < req[1]; n++) {
+      dap_command_shape_t nested;
+
+      if (!dap_command_shape(&req[idx], available - idx, false, &nested))
+        return false;
+      if (!checked_add_u32(idx, nested.request_size, &idx) ||
+          !checked_add_u32(response_size, nested.response_size,
+                           &response_size))
+        return false;
+    }
+    shape->request_size = idx;
+    shape->response_size = response_size;
+    return true;
 
   default:
-    /* Unknown command — cannot determine size. Return 1 to avoid
-     * infinite loop; the packet is likely malformed. */
-    return 1U;
+    /* Unknown and unsupported commands have the standard one-byte error
+     * response and consume only the command byte. */
+    shape->request_size = 1U;
+    shape->response_size = 1U;
+    return true;
   }
 }
 
 static uint32_t dap_execute_commands(dap_data_t *dap, const uint8_t *req,
-                                      uint8_t *resp) {
+                                      uint32_t req_len, uint8_t *resp,
+                                      uint32_t resp_capacity) {
   uint32_t num = req[1];
   uint32_t req_offset = 2U;
   uint32_t resp_offset = 2U;
   uint32_t n;
 
-  resp[0] = req[0];
+  resp[0] = DAP_CMD_EXECUTE_COMMANDS;
   resp[1] = (uint8_t)num;
 
   for (n = 0U; n < num; n++) {
-    uint32_t req_len  = dap_request_size(&req[req_offset]);
-    uint32_t resp_len = dap_process_command(dap, &req[req_offset],
-                                             &resp[resp_offset]);
-    req_offset  += req_len;
-    resp_offset += resp_len;
+    dap_command_shape_t shape;
+    dap_process_result_t result;
+
+    if (!dap_command_shape(&req[req_offset], req_len - req_offset,
+                           false, &shape))
+      break;
+
+    result = dap_process_command(dap, &req[req_offset], shape.request_size,
+                                 &resp[resp_offset],
+                                 resp_capacity - resp_offset);
+    if (result.status != DAP_PROCESS_RESPONSE)
+      break;
+
+    req_offset += shape.request_size;
+    resp_offset += result.response_len;
   }
 
+  resp[1] = (uint8_t)n;
   return resp_offset;
 }
 
@@ -847,8 +1036,11 @@ void dap_init(dap_data_t *dap) {
   dap->match_mask   = 0x00000000U;
 }
 
-uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
-                              uint8_t *response) {
+static uint32_t dap_dispatch_command(dap_data_t *dap,
+                                     const uint8_t *request,
+                                     uint32_t request_len,
+                                     uint8_t *response,
+                                     uint32_t response_capacity) {
   uint8_t cmd = request[0];
 
   switch (cmd) {
@@ -905,7 +1097,8 @@ uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
 
   case DAP_CMD_QUEUE_COMMANDS:
   case DAP_CMD_EXECUTE_COMMANDS:
-    return dap_execute_commands(dap, request, response);
+    return dap_execute_commands(dap, request, request_len, response,
+                                response_capacity);
 
   /* Unsupported commands return DAP_ERROR. */
   case DAP_CMD_JTAG_SEQUENCE:
@@ -923,12 +1116,39 @@ uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
   case DAP_CMD_UART_CONTROL:
   case DAP_CMD_UART_STATUS:
   case DAP_CMD_UART_TRANSFER:
-    response[0] = cmd;
-    response[1] = DAP_ERROR;
-    return 2U;
-
   default:
     response[0] = DAP_ERROR;
     return 1U;
   }
+}
+
+dap_process_result_t dap_process_command(dap_data_t *dap,
+                                         const uint8_t *request,
+                                         uint32_t request_len,
+                                         uint8_t *response,
+                                         uint32_t response_capacity) {
+  dap_process_result_t result = {DAP_PROCESS_MALFORMED, 0U};
+  dap_command_shape_t shape;
+
+  if ((dap == NULL) || (request == NULL) || (response == NULL) ||
+      (response_capacity == 0U))
+    return result;
+
+  if (!dap_command_shape(request, request_len, true, &shape) ||
+      (shape.response_size > response_capacity)) {
+    response[0] = DAP_ERROR;
+    result.response_len = 1U;
+    return result;
+  }
+
+  result.response_len = dap_dispatch_command(dap, request, request_len,
+                                              response, response_capacity);
+  if (result.response_len > response_capacity) {
+    response[0] = DAP_ERROR;
+    result.response_len = 1U;
+    return result;
+  }
+
+  result.status = DAP_PROCESS_RESPONSE;
+  return result;
 }

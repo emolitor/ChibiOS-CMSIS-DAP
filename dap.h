@@ -22,6 +22,7 @@
 #ifndef DAP_H
 #define DAP_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "ch.h"
 
@@ -186,13 +187,26 @@ typedef struct {
   event_source_t *evt_dap;
 } dap_data_t;
 
+typedef enum {
+  DAP_PROCESS_RESPONSE,
+  DAP_PROCESS_MALFORMED
+} dap_process_status_t;
+
+typedef struct {
+  dap_process_status_t status;
+  uint32_t             response_len;
+} dap_process_result_t;
+
 /*===========================================================================*/
 /* Function prototypes.                                                      */
 /*===========================================================================*/
 
-void     dap_init(dap_data_t *dap);
-void     dap_set_serial(const char *serial);
-uint32_t dap_process_command(dap_data_t *dap, const uint8_t *request,
-                              uint8_t *response);
+void                 dap_init(dap_data_t *dap);
+void                 dap_set_serial(const char *serial);
+dap_process_result_t dap_process_command(dap_data_t *dap,
+                                         const uint8_t *request,
+                                         uint32_t request_len,
+                                         uint8_t *response,
+                                         uint32_t response_capacity);
 
 #endif /* DAP_H */

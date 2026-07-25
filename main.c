@@ -334,8 +334,12 @@ static THD_FUNCTION(DapProcessThread, arg) {
                                    TIME_INFINITE) != MSG_OK)
       continue;
     dap_packet_t *pkt = (dap_packet_t *)objp;
+    dap_process_result_t result;
 
-    pkt->resp_len = dap_process_command(&dap_state, pkt->cmd, pkt->resp);
+    dap_state.abort = 0U;
+    result = dap_process_command(&dap_state, pkt->cmd, pkt->cmd_len,
+                                 pkt->resp, sizeof(pkt->resp));
+    pkt->resp_len = result.response_len;
 
     chMBPostTimeout(&resp_mbox, (msg_t)pkt, TIME_INFINITE);
     chEvtSignal(dap_thd, EVT_DAP_RESP_READY);

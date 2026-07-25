@@ -207,9 +207,12 @@ void                 dap_set_serial(const char *serial);
 /*
  * Process a single CMSIS-DAP command.
  *
- * Validates the command against request_len and response_capacity before
- * dispatching; a malformed or over-long command yields a one-byte DAP_ERROR
- * response and DAP_PROCESS_MALFORMED status.
+ * Requires dap, request, and response to be non-NULL and response_capacity to
+ * be non-zero; on such API misuse it returns {DAP_PROCESS_MALFORMED, 0}
+ * without writing a response (there may be no buffer to write to). Given valid
+ * arguments it validates the command against request_len and
+ * response_capacity before dispatching, and a malformed or over-long command
+ * yields a one-byte DAP_ERROR response with DAP_PROCESS_MALFORMED status.
  *
  * The caller owns the dap->abort flag: it must be cleared before invoking
  * this function for a new command (an in-progress transfer inspects it to

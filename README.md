@@ -136,9 +136,9 @@ Or flash via SWD with OpenOCD / another debug probe.
 #### Booting over SWD (dual-core)
 
 The firmware is dual-core (Core 0 runs the USB/DAP/UART threads, Core 1 runs
-`DapProcessThread`), so it must reach the USB host only after Core 1 has
-launched. A plain `reset run` does **not** reliably start Core 1 — Core 0 ends
-up in the idle thread while Core 1 stays parked in the boot ROM, and USB never
+`DapProcessThread`), so it only reaches the USB host after Core 1 has launched.
+A plain `reset run` does **not** reliably start Core 1 — Core 0 ends up in the
+idle thread while Core 1 stays parked in the boot ROM, and USB never
 enumerates. Boot it one of two ways:
 
 - **Full boot-ROM cold reboot** (recommended for this firmware): trigger a

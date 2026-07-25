@@ -152,8 +152,8 @@ enumerates. Boot it one of two ways:
   handshake launches Core 1.
 
 For the **RP2350 in RISC-V mode**, flash with the `rp2350-auto` OpenOCD target:
-`rescue` → `program build/rp2350_riscv/ch.elf verify` → `reset run`. The boot
-ROM reads the PICOBIN image block and switches ARM→RISC-V on reset (the ARM
+`rescue`, then `program build/rp2350_riscv/ch.elf verify`, then `reset run`. The
+boot ROM reads the PICOBIN image block and switches ARM→RISC-V on reset (the ARM
 core then reports `unavailable` and the RISC-V core `running`). Do **not** use
 raw watchdog-register writes to drive that transition — it can leave the debug
 port wedged.

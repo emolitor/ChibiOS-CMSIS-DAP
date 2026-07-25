@@ -133,6 +133,37 @@ back into the firmware in flash.
 
 Or flash via SWD with OpenOCD / another debug probe.
 
+#### Booting over SWD (dual-core)
+
+The firmware is dual-core (Core 0 runs the USB/DAP/UART threads, Core 1 runs
+`DapProcessThread`), so it only reaches the USB host after Core 1 has launched.
+A plain `reset run` does **not** reliably start Core 1 — Core 0 ends up in the
+idle thread while Core 1 stays parked in the boot ROM, and USB never
+enumerates. Boot it one of two ways:
+
+- **Full boot-ROM cold reboot** (recommended for this firmware): trigger a
+  watchdog reset so the boot ROM re-launches both cores from flash. The exact
+  register sequence per chip is in `tests/functional/uart_link_test.py`
+  (`reset_target()` / the `TARGETS` table) — note the RP2040 and RP2350 use
+  different `psm`/`wdsel`/`watchdog` values. A transient "Failed to write
+  memory" as the chip resets mid-write is expected.
+- **Ordered resume** (works for plain demos): `reset halt`, resume Core 1 so it
+  reaches the boot-ROM wait-for-vector loop, then resume Core 0 so its FIFO
+  handshake launches Core 1.
+
+For the **RP2350 in RISC-V mode**, flash with the `rp2350-auto` OpenOCD target:
+`rescue`, then `program build/rp2350_riscv/ch.elf verify`, then `reset run`. The
+boot ROM reads the PICOBIN image block and switches ARM→RISC-V on reset (the ARM
+core then reports `unavailable` and the RISC-V core `running`). Do **not** use
+raw watchdog-register writes to drive that transition — it can leave the debug
+port wedged.
+
+If an RP2350 debug port becomes unresponsive (cores read `unknown` / "target
+not examined", no USB, not even BOOTSEL): lower the SWD clock (e.g.
+`adapter speed 200`), run `rescue`, `arp_examine` the ARM core explicitly, then
+`reset run`. The slow clock plus explicit examine gets the DAP responding
+again.
+
 ## License
 
 This project is licensed under the GNU General Public License v2.0 or later — see [LICENSE](LICENSE) for details.

@@ -98,24 +98,20 @@ static inline void probe_hiz_clocks(uint32_t bit_count) {
 /**
  * @brief   Initialize SWD pins and PIO state machine.
  */
-void swd_init(uint32_t clk_div) {
+bool swd_init(uint32_t clk_div) {
   /* Allocate PIO0 SM0 via PIO LLD (no ISR — polling only). */
   if (swd_sm == NULL) {
     swd_sm = pioSmAlloc(RP_PIO0_BLOCK, 0U, 0U, NULL, NULL);
+    if (swd_sm == NULL)
+      return false;
+
     prog_offset = pioProgramLoad(RP_PIO0_BLOCK, &pio_swd_program);
+    if (prog_offset < 0) {
+      pioSmFree(swd_sm);
+      swd_sm = NULL;
+      return false;
+    }
   }
-
-  /* SWCLK: PIO-controlled via side-set, fast slew, input enabled. */
-  PAD_REG(SWD_PIN_SWCLK) = PAD_IE | PAD_SLEWFAST;
-  pioSmSetPinFunctionX(swd_sm, SWD_PIN_SWCLK);
-  SIO_GPIO_OUT_SET = SWCLK_BIT;
-  SIO_GPIO_OE_SET  = SWCLK_BIT;
-
-  /* SWDIO: PIO-controlled via out/in pins, fast slew, pull-up, input. */
-  PAD_REG(SWD_PIN_SWDIO) = PAD_IE | PAD_PUE | PAD_SLEWFAST;
-  pioSmSetPinFunctionX(swd_sm, SWD_PIN_SWDIO);
-  SIO_GPIO_OUT_SET = SWDIO_BIT;
-  SIO_GPIO_OE_SET  = SWDIO_BIT;
 
   /* nRESET: open-drain (SIO, not PIO), pull-up, deasserted. */
   PAD_REG(SWD_PIN_NRESET) = PAD_IE | PAD_PUE;
@@ -124,10 +120,10 @@ void swd_init(uint32_t clk_div) {
   SIO_GPIO_OE_CLR  = NRESET_BIT;
 
   /* Configure and start state machine. */
-  pio_swd_init(swd_sm, (uint32_t)prog_offset, SWD_PIN_SWCLK, SWD_PIN_SWDIO);
+  pio_swd_init(swd_sm, (uint32_t)prog_offset, SWD_PIN_SWCLK, SWD_PIN_SWDIO,
+               clk_div);
 
-  /* Set clock divider. */
-  pio_swd_set_clkdiv(swd_sm, clk_div);
+  return true;
 }
 
 /**
@@ -142,8 +138,13 @@ void swd_set_clkdiv(uint32_t clk_div) {
  */
 void swd_off(void) {
   if (swd_sm != NULL) {
-    pioProgramUnload(RP_PIO0_BLOCK, prog_offset, PIO_SWD_PROGRAM_LEN);
+    /*
+     * Stop and release the SM before erasing its live instruction memory.
+     * Current ChibiOS deliberately keeps a PIO block out of reset while
+     * either an SM or a program is allocated.
+     */
     pioSmFree(swd_sm);
+    pioProgramUnload(RP_PIO0_BLOCK, prog_offset, PIO_SWD_PROGRAM_LEN);
     swd_sm = NULL;
   }
 

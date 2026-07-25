@@ -42,6 +42,15 @@
 #define RP_CORE1_STACK_END                  __c1_main_stack_end__
 
 /*
+ * EFL driver system settings.
+ *
+ * Current ChibiOS requires SMP applications to select an explicit XIP
+ * safety strategy. The built-in lockout parks the peer core while flash
+ * is unavailable.
+ */
+#define RP_EFL_XIP_SAFETY                   RP_EFL_XIP_SAFETY_LOCKOUT
+
+/*
  * IRQ system settings.
  */
 #define RP_IRQ_UART0_PRIORITY               3

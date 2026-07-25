@@ -1,0 +1,7 @@
+/ChibiOS/
+/.dep/
+/build/
+/tests/build/
+/tests/artifacts/
+/.pytest_cache/
+/**/__pycache__/

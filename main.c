@@ -89,20 +89,24 @@ static void uid_to_hex(const uint8_t *uid, char *hex, uint32_t len) {
  * @brief   CRT0 late init hook — runs after BSS/DATA init, before main().
  */
 void __late_init(void) {
-  uint8_t uid[4U + RP_FLASH_UNIQUE_ID_SIZE];
+  uint8_t uid[4U + RP_FLASH_UNIQUE_ID_SIZE] = {0U};
   char serial_hex[RP_FLASH_UNIQUE_ID_SIZE * 2U + 1U];
-  uint32_t primask;
+  flash_error_t err;
 
   /* Prepare any platform-specific RAM state needed before XIP is toggled. */
   /* This is idempotent on RP devices. */
   rp_efl_lld_init();
 
-  primask = __get_PRIMASK();
-  __disable_irq();
-  rp_efl_lld_read_uid_full(&EFLD1, uid, sizeof(uid));
-  __set_PRIMASK(primask);
+  /*
+   * The low-level implementation masks and restores interrupts using the
+   * appropriate ARM or Hazard3 mechanism while XIP is disabled.
+   */
+  err = rp_efl_lld_read_uid_full(&EFLD1, uid, sizeof(uid));
 
-  uid_to_hex(uid + 4U, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
+  if (err == FLASH_NO_ERROR)
+    uid_to_hex(uid + 4U, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
+  else
+    uid_to_hex(uid, serial_hex, RP_FLASH_UNIQUE_ID_SIZE);
   dap_set_serial(serial_hex);
   usb_set_serial_string(serial_hex);
 }

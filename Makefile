@@ -54,9 +54,13 @@ endif
 ##############################################################################
 
 # ChibiOS location — default to ./ChibiOS checked out via 'make chibios'.
-CHIBIOS     ?= ./ChibiOS
-CHIBIOS_SVN ?= svn://svn.code.sf.net/p/chibios/code/trunk
-PICOTOOL    ?= picotool
+CHIBIOS        ?= ./ChibiOS
+CHIBIOS_GIT    ?= https://github.com/chibios-upstream/chibios.git
+CHIBIOS_BRANCH ?= master
+PICOTOOL       ?= picotool
+
+CHIBIOS_PATCHES := $(abspath \
+  patches/0001-rp-consume-core1-reset-notification.patch)
 
 CHIBIOS_RP2350_RISCV_STARTUP := $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk/startup_rp2350_riscv.mk
 CHIBIOS_RP2350_RISCV_PLATFORM := $(CHIBIOS)/os/hal/ports/RP/RP2350/platform_riscv.mk
@@ -75,12 +79,13 @@ endif
 # Target selection
 #
 
-# When TARGET is not specified, build the default ARM targets.
+# When TARGET is not specified, build all supported targets.
 ifndef TARGET
 .PHONY: all clean
 all clean:
 	$(MAKE) TARGET=rp2040 $@
 	$(MAKE) TARGET=rp2350 $@
+	$(MAKE) TARGET=rp2350_riscv $@
 else
 
 ifeq ($(TARGET),rp2040)
@@ -124,7 +129,7 @@ endif
 
 all:
 	@echo "Error: ChibiOS not found at $(CHIBIOS)"
-	@echo "Run 'make chibios' to checkout from SVN, or set CHIBIOS=/path/to/chibios"
+	@echo "Run 'make chibios' to check out GitHub master, or set CHIBIOS=/path/to/chibios"
 	@exit 1
 
 else
@@ -135,12 +140,14 @@ include $(CHIBIOS)/os/license/license.mk
 ifeq ($(TARGET),rp2040)
 include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_rp2040.mk
 include $(CHIBIOS)/os/hal/ports/RP/RP2040/platform.mk
+include $(CHIBIOS)/os/hal/ports/RP/rp_uf2_image.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO_RP2040/board.mk
 include $(CHIBIOS)/os/common/ports/ARMv6-M/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2040_FLASH.ld
 else ifeq ($(TARGET),rp2350)
 include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_rp2350.mk
 include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform.mk
+include $(CHIBIOS)/os/hal/ports/RP/rp_uf2_image.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
 include $(CHIBIOS)/os/common/ports/ARMv8-M-ML-ALT/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2350_FLASH.ld
@@ -148,6 +155,7 @@ else ifeq ($(TARGET),rp2350_riscv)
 ifeq ($(CHIBIOS_HAS_RP2350_RISCV),yes)
 include $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk/startup_rp2350_riscv.mk
 include $(CHIBIOS)/os/hal/ports/RP/RP2350/platform_riscv.mk
+include $(CHIBIOS)/os/hal/ports/RP/rp_uf2_image.mk
 include $(CHIBIOS)/os/hal/boards/RP_PICO2_RP2350/board.mk
 include $(CHIBIOS)/os/common/ports/RISCV-HAZARD3/compilers/GCC/mk/port_rp2.mk
 LDSCRIPT = $(STARTUPLD)/RP2350_RISCV_FLASH.ld
@@ -216,23 +224,14 @@ include $(RULESPATH)/arm-none-eabi.mk
 endif
 include $(RULESPATH)/rules.mk
 
+all: chibios-check
+
 #
 # Rules
 ##############################################################################
 
-##############################################################################
-# Custom rules — build
-#
-
-$(BUILDDIR)/$(PROJECT).uf2: $(BUILDDIR)/$(PROJECT).elf
-	$(PICOTOOL) uf2 convert $(BUILDDIR)/$(PROJECT).elf $(BUILDDIR)/$(PROJECT).uf2
-
 # End of ChibiOS guard.
 endif
-
-#
-# Custom rules — build
-##############################################################################
 
 # End of TARGET guard.
 endif
@@ -258,24 +257,60 @@ pioasm: probe_swd.pio
 
 .PHONY: chibios
 
-# Checkout/update ChibiOS from SourceForge SVN.
-# Usage:
-#   make chibios                      - checkout trunk
-#   make chibios CHIBIOS_REV=17755    - checkout specific revision
+# Checkout/update ChibiOS from GitHub master and apply the compatibility
+# patches required by this project. Existing changes other than those exact
+# patches are rejected so dependency updates cannot discard local work.
 chibios:
-ifeq ($(wildcard $(CHIBIOS)/.svn),)
-ifdef CHIBIOS_REV
-	svn checkout -r $(CHIBIOS_REV) $(CHIBIOS_SVN) $(CHIBIOS)
+ifeq ($(wildcard $(CHIBIOS)/.git),)
+ifneq ($(wildcard $(CHIBIOS)),)
+	$(error $(CHIBIOS) exists but is not a Git checkout; move it aside or set CHIBIOS=)
 else
-	svn checkout $(CHIBIOS_SVN) $(CHIBIOS)
+	git clone --branch $(CHIBIOS_BRANCH) --single-branch $(CHIBIOS_GIT) $(CHIBIOS)
 endif
 else
-ifdef CHIBIOS_REV
-	svn update -r $(CHIBIOS_REV) $(CHIBIOS)
-else
-	svn update $(CHIBIOS)
+	@test "$$(git -C $(CHIBIOS) remote get-url origin)" = "$(CHIBIOS_GIT)" || \
+	  { echo "Error: $(CHIBIOS) origin is not $(CHIBIOS_GIT)"; exit 1; }
+	@set -e; \
+	if test -n "$$(git -C $(CHIBIOS) status --porcelain)"; then \
+	  for patch in $(CHIBIOS_PATCHES); do \
+	    git -C $(CHIBIOS) apply --reverse --check "$$patch" || \
+	      { echo "Error: $(CHIBIOS) has changes other than the expected patches"; exit 1; }; \
+	    git -C $(CHIBIOS) apply --reverse "$$patch"; \
+	  done; \
+	  test -z "$$(git -C $(CHIBIOS) status --porcelain)" || \
+	    { echo "Error: $(CHIBIOS) has changes other than the expected patches"; exit 1; }; \
+	fi
+	git -C $(CHIBIOS) fetch origin $(CHIBIOS_BRANCH)
+	git -C $(CHIBIOS) merge --ff-only origin/$(CHIBIOS_BRANCH)
 endif
-endif
+	@set -e; \
+	for patch in $(CHIBIOS_PATCHES); do \
+	  if git -C $(CHIBIOS) apply --reverse --check "$$patch" >/dev/null 2>&1; then \
+	    echo "ChibiOS compatibility already present: $$(basename "$$patch")"; \
+	  elif git -C $(CHIBIOS) apply --check "$$patch"; then \
+	    git -C $(CHIBIOS) apply "$$patch"; \
+	    echo "Applied ChibiOS compatibility patch: $$(basename "$$patch")"; \
+	  else \
+	    echo "Error: ChibiOS master is incompatible with $$patch"; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "ChibiOS $$(git -C $(CHIBIOS) rev-parse HEAD)"
+
+.PHONY: chibios-check chibios-sha
+chibios-check:
+	@test -d $(CHIBIOS)/.git || \
+	  { echo "Error: ChibiOS not found at $(CHIBIOS). Run 'make chibios' first"; exit 1; }
+	@set -e; \
+	for patch in $(CHIBIOS_PATCHES); do \
+	  git -C $(CHIBIOS) apply --reverse --check "$$patch" >/dev/null 2>&1 || \
+	    { echo "Error: missing ChibiOS compatibility patch $$(basename "$$patch"); run 'make chibios'"; exit 1; }; \
+	done
+
+chibios-sha:
+	@test -d $(CHIBIOS)/.git || \
+	  { echo "Error: ChibiOS not found at $(CHIBIOS). Run 'make chibios' first"; exit 1; }
+	@git -C $(CHIBIOS) rev-parse HEAD
 
 #
 # ChibiOS checkout

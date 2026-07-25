@@ -9,7 +9,8 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 - **Dual-core SMP model**:
   Core 0 runs the main thread, `DapThread`, and `UartThread`; Core 1 runs `DapProcessThread`
 - **PIO-based SWD** Derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe)
-- **Current ChibiOS Trunk targets**: RP2040 (Cortex-M0+) and RP2350 (Cortex-M33)
+- **Current ChibiOS GitHub master targets**: RP2040 (Cortex-M0+),
+  RP2350 (Cortex-M33), and RP2350 (Hazard3 RISC-V)
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)
 
 ## Performance
@@ -63,17 +64,29 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 ### Prerequisites
 
 - `arm-none-eabi-gcc` toolchain
+- `riscv-none-elf-gcc` toolchain (for RP2350 Hazard3)
 - `picotool` (for UF2 conversion and flashing)
-- `svn` (to check out ChibiOS)
+- `git` (to check out ChibiOS)
 
 ### Build
 
 ```bash
-make chibios                  # check out ChibiOS from SVN (first time only)
-make                          # build the default ARM targets (rp2040, rp2350)
+make chibios                  # clone/update chibios-upstream/chibios master
+make                          # build all targets
 make TARGET=rp2040            # build RP2040 only
 make TARGET=rp2350            # build RP2350 ARM only
+make TARGET=rp2350_riscv      # build RP2350 Hazard3 only
 ```
+
+`make chibios` tracks GitHub master and refuses to update a dirty or
+unexpected checkout. It also applies the compatibility patches in `patches/`;
+the current patch makes RP2040/RP2350 core-1 reset follow the boot-ROM FIFO
+protocol used by the latest Pico SDK. Each successful update prints the exact
+ChibiOS commit; `make chibios-sha` prints it again for test reports. Firmware
+builds fail early if the required compatibility is absent.
+
+To use an existing checkout, set `CHIBIOS=/path/to/chibios`. The repository
+URL and branch can be overridden with `CHIBIOS_GIT=` and `CHIBIOS_BRANCH=`.
 
 ### Flash
 

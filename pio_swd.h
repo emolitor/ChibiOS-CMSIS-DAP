@@ -130,8 +130,11 @@ static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
   pioSmConfigSetOutPinsX(&cfg, rel_swdio, 1U);
   pioSmConfigSetSetPinsX(&cfg, rel_swdio, 1U);
   pioSmConfigSetInPinsX(&cfg, rel_swdio);
-  if (clk_div == 0x1000000U)
-    pioSmConfigSetClkdivX(&cfg, 0U, 0U); /* Integer zero encodes 65536. */
+  if (clk_div >= 0x1000000U)
+    /* Integer zero encodes the maximum divider (65536); clamp anything at or
+     * above it here so an out-of-range value cannot overflow the 16-bit
+     * integer field and select a smaller divider (a faster clock). */
+    pioSmConfigSetClkdivX(&cfg, 0U, 0U);
   else
     pioSmConfigSetClkdivX(&cfg, clk_div >> 8, clk_div & 0xFFU);
   pioSmInit(smp, prog_offset + PIO_SWD_OFFSET_GET_NEXT_CMD, &cfg);
@@ -157,13 +160,13 @@ static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
 static inline void pio_swd_set_clkdiv(const rp_pio_sm_t *smp,
                                         uint32_t clk_div) {
   /* CLKDIV register: [31:16]=integer, [15:8]=fractional, [7:0]=reserved.
-   * The maximum divider 65536.0 (clk_div == 0x1000000) does not fit the
-   * 16-bit integer field and is encoded as integer zero, matching
-   * pio_swd_init(). Encoding it directly would shift the 1 out of the
-   * 32-bit register and only happen to read back as 65536 — special-case
-   * it so the runtime clkdiv path does not rely on that overflow. */
-  uint32_t int_part = (clk_div == 0x1000000U) ? 0U : (clk_div >> 8);
-  uint32_t frac_part = clk_div & 0xFFU;
+   * The maximum divider 65536.0 does not fit the 16-bit integer field and is
+   * encoded as integer zero, matching pio_swd_init(). Clamp anything at or
+   * above it: encoding such a value directly would shift the integer part out
+   * of the 32-bit register and could select a smaller divider (a faster
+   * clock) instead of the intended maximum. */
+  uint32_t int_part  = (clk_div >= 0x1000000U) ? 0U : (clk_div >> 8);
+  uint32_t frac_part = (clk_div >= 0x1000000U) ? 0U : (clk_div & 0xFFU);
   pioSmSetClkdivX(smp, PIO_SM_CLKDIV(int_part, frac_part));
 }
 

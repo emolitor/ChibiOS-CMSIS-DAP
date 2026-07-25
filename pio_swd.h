@@ -156,8 +156,13 @@ static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
  */
 static inline void pio_swd_set_clkdiv(const rp_pio_sm_t *smp,
                                         uint32_t clk_div) {
-  /* CLKDIV register: [31:16]=integer, [15:8]=fractional, [7:0]=reserved. */
-  uint32_t int_part = clk_div >> 8;
+  /* CLKDIV register: [31:16]=integer, [15:8]=fractional, [7:0]=reserved.
+   * The maximum divider 65536.0 (clk_div == 0x1000000) does not fit the
+   * 16-bit integer field and is encoded as integer zero, matching
+   * pio_swd_init(). Encoding it directly would shift the 1 out of the
+   * 32-bit register and only happen to read back as 65536 — special-case
+   * it so the runtime clkdiv path does not rely on that overflow. */
+  uint32_t int_part = (clk_div == 0x1000000U) ? 0U : (clk_div >> 8);
   uint32_t frac_part = clk_div & 0xFFU;
   pioSmSetClkdivX(smp, PIO_SM_CLKDIV(int_part, frac_part));
 }

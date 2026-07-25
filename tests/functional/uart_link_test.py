@@ -70,15 +70,24 @@ class UartPort:
             raise RuntimeError(f"unable to uniquely find UART device {serial}")
         self.dev = matches[0]
         self.detached = []
+        self.claimed = []
         try:
-            self.dev.get_active_configuration()
-        except usb.core.USBError:
-            self.dev.set_configuration()
-        for interface in (1, 2):
-            if self.dev.is_kernel_driver_active(interface):
-                self.dev.detach_kernel_driver(interface)
-                self.detached.append(interface)
-            usb.util.claim_interface(self.dev, interface)
+            try:
+                self.dev.get_active_configuration()
+            except usb.core.USBError:
+                self.dev.set_configuration()
+            for interface in (1, 2):
+                if self.dev.is_kernel_driver_active(interface):
+                    self.dev.detach_kernel_driver(interface)
+                    self.detached.append(interface)
+                usb.util.claim_interface(self.dev, interface)
+                self.claimed.append(interface)
+        except Exception:
+            # A partially initialized port cannot be closed by the caller, so
+            # release claims and reattach kernel drivers before propagating —
+            # otherwise a failed retry leaves the CDC device unusable.
+            self._release()
+            raise
 
     def configure(self, baud: int, stop_bits: int, parity: int, data_bits: int) -> None:
         line_coding = struct.pack("<IBBB", baud, stop_bits, parity, data_bits)
@@ -126,12 +135,17 @@ class UartPort:
             raise AssertionError(f"expected {length} bytes, received {len(result)}")
         return bytes(result)
 
-    def close(self) -> None:
-        for interface in (2, 1):
+    def _release(self) -> None:
+        for interface in reversed(self.claimed):
             usb.util.release_interface(self.dev, interface)
+        self.claimed = []
         for interface in self.detached:
             self.dev.attach_kernel_driver(interface)
+        self.detached = []
         usb.util.dispose_resources(self.dev)
+
+    def close(self) -> None:
+        self._release()
 
 
 def uart_dividers(clock: int, baud: int) -> tuple[int, int]:
@@ -227,6 +241,10 @@ def start_echo(serial: str, target: str, image: pathlib.Path) -> None:
             f"load_image {image}",
             f"verify_image {image}",
             f"targets {cfg['core']}",
+            # Mask interrupts before resuming: the flashed firmware's NVIC and
+            # SysTick are still configured, so a pending RTOS tick could enter
+            # its handlers and context-switch away from the RAM echo program.
+            "reg primask 1",
             "resume 0x20010000",
             "shutdown",
         ],
@@ -263,7 +281,10 @@ def wait_for_uart(serial: str, timeout: float = 8.0) -> None:
             port = UartPort(serial)
             port.close()
             return
-        except RuntimeError as exc:
+        except (RuntimeError, usb.core.USBError) as exc:
+            # Right after the watchdog reboot the descriptor may be readable
+            # while set_configuration / interface claim still raise a transient
+            # USBError; keep retrying within the timeout window.
             last_error = exc
             time.sleep(0.25)
     raise RuntimeError(f"UART device {serial} did not re-enumerate") from last_error

@@ -68,8 +68,11 @@ class Probe:
         usb.util.dispose_resources(self.dev)
 
     def write(self, request: bytes) -> None:
-        written = self.dev.write(DAP_OUT, request, timeout=2000)
-        assert written == len(request)
+        # PyUSB may perform a partial write; loop until the whole request is
+        # sent rather than asserting a single full write.
+        offset = 0
+        while offset < len(request):
+            offset += self.dev.write(DAP_OUT, request[offset:], timeout=2000)
 
     def read(self) -> bytes:
         return bytes(self.dev.read(DAP_IN, PACKET_SIZE, timeout=5000))

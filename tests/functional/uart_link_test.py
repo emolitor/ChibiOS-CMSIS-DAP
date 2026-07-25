@@ -299,7 +299,9 @@ def exchange_full_duplex(port: UartPort, payload: bytes) -> bytes:
         except Exception as exc:  # Propagate PyUSB errors to the main thread.
             write_error.append(exc)
 
-    writer = threading.Thread(target=write_payload)
+    # Daemon so a hung USB write cannot keep the process alive after the join
+    # times out below and the function fails fast.
+    writer = threading.Thread(target=write_payload, daemon=True)
     writer.start()
     received = port.read_exact(len(payload))
     writer.join(timeout=5.0)

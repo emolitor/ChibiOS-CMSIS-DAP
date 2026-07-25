@@ -89,6 +89,10 @@ builds fail early if the required compatibility is absent.
 
 To use an existing checkout, set `CHIBIOS=/path/to/chibios`. The repository
 URL and branch can be overridden with `CHIBIOS_GIT=` and `CHIBIOS_BRANCH=`.
+For a reproducible build, pin a specific upstream commit or tag with
+`CHIBIOS_REV=`; `make chibios CHIBIOS_REV=<sha>` checks that revision out
+instead of tracking the branch head, and `make chibios-sha` prints the
+resolved commit.
 
 ### Tests
 

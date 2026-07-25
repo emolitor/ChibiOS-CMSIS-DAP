@@ -57,6 +57,9 @@ endif
 CHIBIOS        ?= ./ChibiOS
 CHIBIOS_GIT    ?= https://github.com/chibios-upstream/chibios.git
 CHIBIOS_BRANCH ?= master
+# Optional: pin a specific upstream commit or tag for reproducible builds.
+# When empty, 'make chibios' tracks the branch head.
+CHIBIOS_REV    ?=
 PICOTOOL       ?= picotool
 
 CHIBIOS_PATCHES := $(abspath \
@@ -260,28 +263,54 @@ pioasm: probe_swd.pio
 # Checkout/update ChibiOS from GitHub master and apply the compatibility
 # patches required by this project. Existing changes other than those exact
 # patches are rejected so dependency updates cannot discard local work.
+# Set CHIBIOS_REV=<commit-or-tag> to pin a specific upstream revision instead
+# of tracking the branch head.
 chibios:
 ifeq ($(wildcard $(CHIBIOS)/.git),)
 ifneq ($(wildcard $(CHIBIOS)),)
 	$(error $(CHIBIOS) exists but is not a Git checkout; move it aside or set CHIBIOS=)
-else
+else ifeq ($(strip $(CHIBIOS_REV)),)
 	git clone --branch $(CHIBIOS_BRANCH) --single-branch $(CHIBIOS_GIT) $(CHIBIOS)
+else
+	git clone $(CHIBIOS_GIT) $(CHIBIOS)
+	git -C $(CHIBIOS) checkout --detach $(CHIBIOS_REV)
 endif
 else
 	@test "$$(git -C $(CHIBIOS) remote get-url origin)" = "$(CHIBIOS_GIT)" || \
 	  { echo "Error: $(CHIBIOS) origin is not $(CHIBIOS_GIT)"; exit 1; }
 	@set -e; \
+	reverted=""; \
 	if test -n "$$(git -C $(CHIBIOS) status --porcelain)"; then \
 	  for patch in $(CHIBIOS_PATCHES); do \
 	    git -C $(CHIBIOS) apply --reverse --check "$$patch" || \
 	      { echo "Error: $(CHIBIOS) has changes other than the expected patches"; exit 1; }; \
+	  done; \
+	  for patch in $(CHIBIOS_PATCHES); do \
 	    git -C $(CHIBIOS) apply --reverse "$$patch"; \
 	  done; \
 	  test -z "$$(git -C $(CHIBIOS) status --porcelain)" || \
 	    { echo "Error: $(CHIBIOS) has changes other than the expected patches"; exit 1; }; \
+	  reverted="yes"; \
+	fi; \
+	if test -n "$(strip $(CHIBIOS_REV))"; then \
+	  update() { git -C $(CHIBIOS) fetch origin "$(CHIBIOS_REV)" && \
+	             git -C $(CHIBIOS) checkout --detach FETCH_HEAD; }; \
+	else \
+	  update() { git -C $(CHIBIOS) fetch origin $(CHIBIOS_BRANCH) && \
+	             git -C $(CHIBIOS) merge --ff-only origin/$(CHIBIOS_BRANCH); }; \
+	fi; \
+	if update; then \
+	  :; \
+	else \
+	  status=$$?; \
+	  if test -n "$$reverted"; then \
+	    echo "Update failed; restoring compatibility patch(es)"; \
+	    for patch in $(CHIBIOS_PATCHES); do \
+	      git -C $(CHIBIOS) apply "$$patch" || true; \
+	    done; \
+	  fi; \
+	  exit $$status; \
 	fi
-	git -C $(CHIBIOS) fetch origin $(CHIBIOS_BRANCH)
-	git -C $(CHIBIOS) merge --ff-only origin/$(CHIBIOS_BRANCH)
 endif
 	@set -e; \
 	for patch in $(CHIBIOS_PATCHES); do \
@@ -299,8 +328,8 @@ endif
 
 .PHONY: chibios-check chibios-sha
 chibios-check:
-	@test -d $(CHIBIOS)/.git || \
-	  { echo "Error: ChibiOS not found at $(CHIBIOS). Run 'make chibios' first"; exit 1; }
+	@prefix="$$(git -C $(CHIBIOS) rev-parse --show-prefix 2>/dev/null)" && test -z "$$prefix" || \
+	  { echo "Error: $(CHIBIOS) is not a ChibiOS checkout root. Run 'make chibios' first"; exit 1; }
 	@set -e; \
 	for patch in $(CHIBIOS_PATCHES); do \
 	  git -C $(CHIBIOS) apply --reverse --check "$$patch" >/dev/null 2>&1 || \
@@ -308,8 +337,8 @@ chibios-check:
 	done
 
 chibios-sha:
-	@test -d $(CHIBIOS)/.git || \
-	  { echo "Error: ChibiOS not found at $(CHIBIOS). Run 'make chibios' first"; exit 1; }
+	@prefix="$$(git -C $(CHIBIOS) rev-parse --show-prefix 2>/dev/null)" && test -z "$$prefix" || \
+	  { echo "Error: $(CHIBIOS) is not a ChibiOS checkout root. Run 'make chibios' first"; exit 1; }
 	@git -C $(CHIBIOS) rev-parse HEAD
 
 #

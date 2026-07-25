@@ -326,7 +326,7 @@ HOST_TEST_CFLAGS ?= -std=c11 -O1 -g3 -Wall -Wextra -Werror \
 HOST_TEST_LDFLAGS ?= -fsanitize=address,undefined
 HOST_TEST_BIN := tests/build/test_dap
 
-.PHONY: test test-unit
+.PHONY: test test-unit test-descriptors check
 
 $(HOST_TEST_BIN): dap.c dap.h swd.h tests/unit/test_dap.c \
                   tests/stubs/ch.h tests/stubs/hal.h
@@ -338,7 +338,16 @@ test-unit: $(HOST_TEST_BIN)
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 	  UBSAN_OPTIONS=halt_on_error=1 $(HOST_TEST_BIN)
 
-test: test-unit
+test-descriptors:
+	python3 -m pytest -q tests/test_descriptors.py
+
+test: test-unit test-descriptors
+
+check: test
+	$(MAKE) chibios-check
+	$(MAKE) TARGET=rp2040 all
+	$(MAKE) TARGET=rp2350 all
+	$(MAKE) TARGET=rp2350_riscv all
 
 #
 # Host tests

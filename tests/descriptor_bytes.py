@@ -233,7 +233,12 @@ def declared_size(name):
 
 
 def descriptor(name):
-    """Return the emitted bytes for a `static ... uint8_t NAME[...] = {...};`."""
+    """Return the emitted bytes for a `static ... uint8_t NAME[...] = {...};`.
+
+    An explicitly sized array (`NAME[N]`) emits N bytes: C zero-initializes any
+    positions the initializer leaves out. This models that by zero-padding to
+    the declared dimension (and rejecting an initializer that overflows it).
+    """
     m = re.search(
         r"uint8_t\s+" + re.escape(name) + r"\s*\[[^\]]*\]\s*=\s*\{(.*?)\};",
         SOURCE,
@@ -241,7 +246,13 @@ def descriptor(name):
     )
     if not m:
         raise KeyError(name)
-    return emit_bytes(m.group(1))
+    out = emit_bytes(m.group(1))
+    size = declared_size(name)
+    if size is not None:
+        if len(out) > size:
+            raise ValueError(f"{name}: {len(out)} initializers exceed [{size}]")
+        out += [0] * (size - len(out))
+    return out
 
 
 def walk_children(desc, start):

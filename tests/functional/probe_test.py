@@ -68,11 +68,14 @@ class Probe:
         usb.util.dispose_resources(self.dev)
 
     def write(self, request: bytes) -> None:
-        # PyUSB may perform a partial write; loop until the whole request is
-        # sent rather than asserting a single full write.
-        offset = 0
-        while offset < len(request):
-            offset += self.dev.write(DAP_OUT, request[offset:], timeout=2000)
+        # A CMSIS-DAP command is a single bulk-OUT transaction: the firmware
+        # processes each OUT transfer as one complete command, so a short write
+        # must not be continued in a second transfer (that would inject a
+        # second, malformed command). Require the whole packet in one write.
+        written = self.dev.write(DAP_OUT, request, timeout=2000)
+        assert written == len(request), (
+            f"short DAP bulk-OUT write: {written}/{len(request)} bytes"
+        )
 
     def read(self) -> bytes:
         return bytes(self.dev.read(DAP_IN, PACKET_SIZE, timeout=5000))

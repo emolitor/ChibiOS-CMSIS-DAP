@@ -94,9 +94,6 @@ with `CHIBIOS_REV=<rev>`, or pass `CHIBIOS_REV=` explicitly to test the current
 can be force-moved, so they are only a convenience; if you use a tag, record
 the commit that `make chibios-sha` reports.
 
-The current pin and its complete firmware-impact audit are recorded in
-[`docs/chibios-master-2026-08-03.md`](docs/chibios-master-2026-08-03.md).
-
 ### Tests
 
 ```bash

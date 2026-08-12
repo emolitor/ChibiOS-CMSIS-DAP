@@ -166,8 +166,19 @@ def validate_protocol(probe: Probe) -> None:
     assert probe.exchange(bytes((0x13, 0x00))) == bytes((0x13, 0x00))
     assert probe.exchange(bytes((0x03,))) == bytes((0x03, 0x00))
 
-    for _ in range(25):
-        assert probe.exchange(bytes((0x02, 0x01)))[1] == 0x01
+    # A maximum-length output sequence queues sixteen PIO FIFO words. Running
+    # it at the minimum representable clock leaves useful work behind the USB
+    # response, so the following clock change and disconnect exercise the PIO
+    # completion barrier rather than an already-idle state machine.
+    max_swj_sequence = bytes((0x12, 0x00)) + bytes((0xA5,)) * 32
+    slow_clock = bytes((0x11, 0x01, 0x00, 0x00, 0x00))
+    normal_clock = bytes((0x11, 0x40, 0x42, 0x0F, 0x00))
+
+    for _ in range(100):
+        assert probe.exchange(bytes((0x02, 0x01))) == bytes((0x02, 0x01))
+        assert probe.exchange(slow_clock) == bytes((0x11, 0x00))
+        assert probe.exchange(max_swj_sequence) == bytes((0x12, 0x00))
+        assert probe.exchange(normal_clock) == bytes((0x11, 0x00))
         assert probe.exchange(bytes((0x03,))) == bytes((0x03, 0x00))
 
 

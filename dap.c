@@ -227,10 +227,11 @@ static uint32_t dap_connect(dap_data_t *dap, const uint8_t *req,
 /*===========================================================================*/
 
 static uint32_t dap_disconnect(dap_data_t *dap, uint8_t *resp) {
-  swd_off();
+  bool stopped = swd_off();
+
   dap->debug_port = 0U;
   resp[0] = DAP_CMD_DISCONNECT;
-  resp[1] = DAP_OK;
+  resp[1] = stopped ? DAP_OK : DAP_ERROR;
   return 2U;
 }
 
@@ -629,8 +630,6 @@ static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
     return 2U;
   }
 
-  dap->clock_freq = clock;
-
   /* Calculate PIO clock divider as 16.8 fixed-point.
    * PIO SM runs at sys_clk / clkdiv, each SWCLK period = 4 PIO cycles.
    * clkdiv = sys_clk / (4 * target_freq).
@@ -642,9 +641,14 @@ static uint32_t dap_swj_clock(dap_data_t *dap, const uint8_t *req,
     clkdiv_256 = 0x100U;  /* Minimum 1.0 */
   else if (clkdiv_256 > 0x1000000U)
     clkdiv_256 = 0x1000000U;  /* Maximum 65536.0 */
+  if ((dap->debug_port == DAP_PORT_SWD) &&
+      !swd_set_clkdiv((uint32_t)clkdiv_256)) {
+    resp[1] = DAP_ERROR;
+    return 2U;
+  }
+
+  dap->clock_freq = clock;
   dap->clk_div = (uint32_t)clkdiv_256;
-  if (dap->debug_port == DAP_PORT_SWD)
-    swd_set_clkdiv((uint32_t)clkdiv_256);
 
   resp[1] = DAP_OK;
   return 2U;

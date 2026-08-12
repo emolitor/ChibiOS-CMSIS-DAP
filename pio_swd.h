@@ -52,6 +52,7 @@
 #define PIO_SWD_OFFSET_TURNAROUND_CMD probe_swd_offset_turnaround_cmd
 #define PIO_SWD_OFFSET_GET_NEXT_CMD   probe_swd_offset_get_next_cmd
 #define PIO_SWD_OFFSET_READ_CMD       probe_swd_offset_read_cmd
+#define PIO_SWD_OFFSET_BARRIER_CMD    probe_swd_offset_barrier_cmd
 #define PIO_SWD_WRAP_TARGET           probe_swd_wrap_target
 #define PIO_SWD_WRAP                  probe_swd_wrap
 #define PIO_SWD_PROGRAM_LEN           (sizeof(probe_swd_program_instructions) / sizeof(uint16_t))
@@ -99,6 +100,26 @@ static inline uint32_t pio_swd_cmd(uint32_t bit_count, bool out_en,
 /*===========================================================================*/
 
 /**
+ * @brief   Encode a 16.8 fixed-point divider as a CLKDIV register value.
+ * @details CLKDIV is [31:16]=integer, [15:8]=fractional, [7:0]=reserved.
+ *          The maximum divider 65536.0 does not fit the 16-bit integer
+ *          field and is encoded as integer zero, which is also the only
+ *          integer value the LLD accepts with a zero fraction. Anything at
+ *          or above it is clamped there: encoding such a value directly
+ *          would shift the integer part out of the 32-bit register and
+ *          could select a smaller divider (a faster clock) instead of the
+ *          intended maximum.
+ *
+ * @param[in] clk_div  clock divider as 16.8 fixed-point
+ * @return    CLKDIV register value
+ */
+static inline uint32_t pio_swd_clkdiv_reg(uint32_t clk_div) {
+  if (clk_div >= 0x1000000U)
+    return PIO_SM_CLKDIV(0U, 0U);
+  return PIO_SM_CLKDIV(clk_div >> 8, clk_div & 0xFFU);
+}
+
+/**
  * @brief   Configure state machine for SWD operation.
  * @pre     SM must be allocated via pioSmAlloc() and program loaded via
  *          pioProgramLoad().
@@ -114,6 +135,7 @@ static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
   rp_pio_sm_config_t cfg;
   uint32_t rel_swclk = pioGpioToRel(smp->block, pin_swclk);
   uint32_t rel_swdio = pioGpioToRel(smp->block, pin_swdio);
+  uint32_t clkdiv_reg = pio_swd_clkdiv_reg(clk_div);
 
   /*
    * Use the current PIO LLD's complete initialization path. In addition to
@@ -130,13 +152,10 @@ static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
   pioSmConfigSetOutPinsX(&cfg, rel_swdio, 1U);
   pioSmConfigSetSetPinsX(&cfg, rel_swdio, 1U);
   pioSmConfigSetInPinsX(&cfg, rel_swdio);
-  if (clk_div >= 0x1000000U)
-    /* Integer zero encodes the maximum divider (65536); clamp anything at or
-     * above it here so an out-of-range value cannot overflow the 16-bit
-     * integer field and select a smaller divider (a faster clock). */
-    pioSmConfigSetClkdivX(&cfg, 0U, 0U);
-  else
-    pioSmConfigSetClkdivX(&cfg, clk_div >> 8, clk_div & 0xFFU);
+  pioSmConfigSetClkdivX(&cfg,
+                        clkdiv_reg >> PIO_SM_CLKDIV_INT_Pos,
+                        (clkdiv_reg & PIO_SM_CLKDIV_FRAC_Msk) >>
+                          PIO_SM_CLKDIV_FRAC_Pos);
   pioSmInit(smp, prog_offset + PIO_SWD_OFFSET_GET_NEXT_CMD, &cfg);
 
   /* Route pads after the SM has been initialized, then enable both outputs. */
@@ -159,15 +178,7 @@ static inline void pio_swd_init(const rp_pio_sm_t *smp, uint32_t prog_offset,
  */
 static inline void pio_swd_set_clkdiv(const rp_pio_sm_t *smp,
                                         uint32_t clk_div) {
-  /* CLKDIV register: [31:16]=integer, [15:8]=fractional, [7:0]=reserved.
-   * The maximum divider 65536.0 does not fit the 16-bit integer field and is
-   * encoded as integer zero, matching pio_swd_init(). Clamp anything at or
-   * above it: encoding such a value directly would shift the integer part out
-   * of the 32-bit register and could select a smaller divider (a faster
-   * clock) instead of the intended maximum. */
-  uint32_t int_part  = (clk_div >= 0x1000000U) ? 0U : (clk_div >> 8);
-  uint32_t frac_part = (clk_div >= 0x1000000U) ? 0U : (clk_div & 0xFFU);
-  pioSmSetClkdivX(smp, PIO_SM_CLKDIV(int_part, frac_part));
+  pioSmSetClkdivX(smp, pio_swd_clkdiv_reg(clk_div));
 }
 
 #endif /* PIO_SWD_H */

@@ -69,8 +69,8 @@
 /*===========================================================================*/
 
 bool swd_init(uint32_t clk_div);
-void swd_set_clkdiv(uint32_t clk_div);
-void swd_off(void);
+bool swd_set_clkdiv(uint32_t clk_div);
+bool swd_off(void);
 uint8_t swd_transfer(uint32_t request, uint32_t *data,
                       uint32_t idle_cycles, uint32_t turnaround,
                       uint32_t data_phase);

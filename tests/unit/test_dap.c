@@ -27,8 +27,11 @@ static uint32_t data_script[512];
 static size_t script_count;
 static size_t script_index;
 static bool swd_init_ok = true;
+static bool swd_set_ok = true;
+static bool swd_off_ok = true;
 static uint32_t swd_init_div;
 static uint32_t swd_set_div;
+static unsigned swd_set_count;
 static unsigned swd_off_count;
 static uint32_t swj_count;
 static uint8_t swj_data[32];
@@ -55,8 +58,11 @@ static void reset_mocks(void) {
   script_count = 0U;
   script_index = 0U;
   swd_init_ok = true;
+  swd_set_ok = true;
+  swd_off_ok = true;
   swd_init_div = 0U;
   swd_set_div = 0U;
+  swd_set_count = 0U;
   swd_off_count = 0U;
   swj_count = 0U;
   sequence_info = 0U;
@@ -77,12 +83,15 @@ bool swd_init(uint32_t clk_div) {
   return swd_init_ok;
 }
 
-void swd_set_clkdiv(uint32_t clk_div) {
+bool swd_set_clkdiv(uint32_t clk_div) {
   swd_set_div = clk_div;
+  swd_set_count++;
+  return swd_set_ok;
 }
 
-void swd_off(void) {
+bool swd_off(void) {
   swd_off_count++;
+  return swd_off_ok;
 }
 
 uint8_t swd_transfer(uint32_t request, uint32_t *data,
@@ -244,6 +253,60 @@ static void test_connect_and_configuration(void) {
                    response, sizeof(response));
   CHECK(response[1] == DAP_OK);
   CHECK(swd_off_count == 1U);
+}
+
+static void test_barrier_failure_reporting(void) {
+  dap_data_t dap;
+  uint8_t response[64];
+  const uint8_t connect[] = {DAP_CMD_CONNECT, DAP_PORT_SWD};
+  const uint8_t disconnect[] = {DAP_CMD_DISCONNECT};
+  const uint8_t clock[] = {DAP_CMD_SWJ_CLOCK, 0x80U, 0x84U, 0x1EU, 0x00U};
+  const uint8_t failed_clock[] = {
+    DAP_CMD_SWJ_CLOCK, 0xC0U, 0xC6U, 0x2DU, 0x00U
+  };
+  uint32_t previous_clock;
+  uint32_t previous_div;
+
+  reset_mocks();
+  dap_init(&dap);
+
+  /* A disconnected clock update does not need a hardware barrier. */
+  swd_set_ok = false;
+  CHECK(process(&dap, clock, sizeof(clock), response,
+                sizeof(response)).status == DAP_PROCESS_RESPONSE);
+  CHECK(response[1] == DAP_OK);
+  CHECK(swd_set_count == 0U);
+  CHECK(dap.clock_freq == 2000000U);
+
+  swd_set_ok = true;
+  CHECK(process(&dap, connect, sizeof(connect), response,
+                sizeof(response)).status == DAP_PROCESS_RESPONSE);
+  CHECK(response[1] == DAP_PORT_SWD);
+  previous_clock = dap.clock_freq;
+  previous_div = dap.clk_div;
+
+  /* A failed barrier reports an error and preserves the active settings. */
+  swd_set_ok = false;
+  CHECK(process(&dap, failed_clock, sizeof(failed_clock), response,
+                sizeof(response)).status == DAP_PROCESS_RESPONSE);
+  CHECK(response[1] == DAP_ERROR);
+  CHECK(swd_set_count == 1U);
+  CHECK(dap.clock_freq == previous_clock);
+  CHECK(dap.clk_div == previous_div);
+
+  /* Teardown still clears the logical connection when its barrier fails. */
+  swd_off_ok = false;
+  CHECK(process(&dap, disconnect, sizeof(disconnect), response,
+                sizeof(response)).status == DAP_PROCESS_RESPONSE);
+  CHECK(response[1] == DAP_ERROR);
+  CHECK(swd_off_count == 1U);
+  CHECK(dap.debug_port == 0U);
+
+  swd_off_ok = true;
+  CHECK(process(&dap, disconnect, sizeof(disconnect), response,
+                sizeof(response)).status == DAP_PROCESS_RESPONSE);
+  CHECK(response[1] == DAP_OK);
+  CHECK(swd_off_count == 2U);
 }
 
 static void test_transfer_retry_and_dp_read(void) {
@@ -657,6 +720,7 @@ static void test_execute_response_id_echoes_request(void) {
 int main(void) {
   test_info_and_serial();
   test_connect_and_configuration();
+  test_barrier_failure_reporting();
   test_transfer_retry_and_dp_read();
   test_posted_ap_reads();
   test_match_and_block_transfers();

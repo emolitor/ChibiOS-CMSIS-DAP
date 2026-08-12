@@ -29,6 +29,7 @@
 ;   - Side-set: 1-bit optional on SWCLK (4 PIO cycles per SWCLK edge)
 ;   - Writes are fire-and-forget (TX FIFO only)
 ;   - Reads block on RX FIFO
+;   - A barrier command sets PIO IRQ flag 0 after earlier commands complete
 
 .program probe_swd
 .side_set 1 opt
@@ -52,3 +53,10 @@ public read_cmd:
     jmp x-- read_bitloop         side 0x0
     push
 .wrap
+
+; Kept outside the normal wrap range so ordinary command execution does not
+; assert the flag. The explicit jump returns to the command pull after the
+; host observes and clears it.
+public barrier_cmd:
+    irq 0
+    jmp get_next_cmd

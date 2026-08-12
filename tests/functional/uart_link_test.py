@@ -24,10 +24,30 @@ BUILD = ROOT / "tests" / "build" / "uart_echo"
 ECHO_SOURCE = pathlib.Path(__file__).with_name("uart_echo_target.c")
 OPENOCD_SCRIPTS = pathlib.Path("/usr/local/share/openocd/scripts")
 
+# The echo program is freestanding register pokes, so the same source builds
+# for either architecture; only the toolchain, the core OpenOCD selects, and
+# the way interrupts are masked before resuming differ. The peripheral map is
+# a property of the chip and is shared by both RP2350 entries.
+RP2350_REGISTERS = {
+    "clock": 150_000_000,
+    "uart": 0x40070000,
+    "io": 0x40028000,
+    "pads": 0x40038000,
+    "resets": 0x40020000,
+    "reset_uart0": 1 << 26,
+    "psm": 0x40018000,
+    "wdsel": 0x01FFFFF3,
+    "watchdog": 0x400D8000,
+}
+
 TARGETS = {
     "rp2040": {
-        "cpu": "cortex-m0plus",
+        "compiler": "arm-none-eabi-gcc",
+        "arch_flags": ("-mcpu=cortex-m0plus", "-mthumb"),
+        "cfg": "target/rp2040.cfg",
+        "use_core": None,
         "core": "rp2040.core0",
+        "mask_interrupts": "reg primask 1",
         "clock": 200_000_000,
         "uart": 0x40034000,
         "io": 0x40014000,
@@ -39,17 +59,25 @@ TARGETS = {
         "watchdog": 0x40058000,
     },
     "rp2350": {
-        "cpu": "cortex-m33",
+        "compiler": "arm-none-eabi-gcc",
+        "arch_flags": ("-mcpu=cortex-m33", "-mthumb"),
+        "cfg": "target/rp2350.cfg",
+        "use_core": None,
         "core": "rp2350.cm0",
-        "clock": 150_000_000,
-        "uart": 0x40070000,
-        "io": 0x40028000,
-        "pads": 0x40038000,
-        "resets": 0x40020000,
-        "reset_uart0": 1 << 26,
-        "psm": 0x40018000,
-        "wdsel": 0x01FFFFF3,
-        "watchdog": 0x400D8000,
+        "mask_interrupts": "reg primask 1",
+        **RP2350_REGISTERS,
+    },
+    "rp2350_riscv": {
+        "compiler": "riscv-none-elf-gcc",
+        "arch_flags": ("-march=rv32imac", "-mabi=ilp32"),
+        # Shares target/rp2350.cfg, which defaults to the Cortex-M pair; on a
+        # RISC-V image those report unavailable and are never examined.
+        "cfg": "target/rp2350.cfg",
+        "use_core": "rv0",
+        "core": "rp2350.rv0",
+        # MPP=machine with MIE clear, the Hazard3 counterpart of PRIMASK.
+        "mask_interrupts": "reg mstatus 0x1800",
+        **RP2350_REGISTERS,
     },
 }
 
@@ -188,9 +216,8 @@ def build_echo(target: str, baud: int, stop: int, parity: int, bits: int) -> pat
     output = BUILD / f"{target}-{baud}-{stop}-{parity}-{bits}.elf"
     BUILD.mkdir(parents=True, exist_ok=True)
     command = [
-        "arm-none-eabi-gcc",
-        f"-mcpu={cfg['cpu']}",
-        "-mthumb",
+        cfg["compiler"],
+        *cfg["arch_flags"],
         "-Os",
         "-ffreestanding",
         "-fno-builtin",
@@ -219,6 +246,7 @@ def build_echo(target: str, baud: int, stop: int, parity: int, bits: int) -> pat
 
 
 def openocd(serial: str, target: str, commands: list[str]) -> subprocess.CompletedProcess:
+    cfg = TARGETS[target]
     command = [
         "openocd",
         "-s",
@@ -229,9 +257,12 @@ def openocd(serial: str, target: str, commands: list[str]) -> subprocess.Complet
         f"adapter serial {serial}",
         "-c",
         "adapter speed 1000",
-        "-f",
-        f"target/{target}.cfg",
     ]
+    # USE_CORE must be set before the target config is sourced, as the config
+    # reads it while creating the target objects.
+    if cfg["use_core"] is not None:
+        command.extend(("-c", f"set USE_CORE {cfg['use_core']}"))
+    command.extend(("-f", cfg["cfg"]))
     for item in commands:
         command.extend(("-c", item))
     return subprocess.run(
@@ -251,10 +282,11 @@ def start_echo(serial: str, target: str, image: pathlib.Path) -> None:
             f"load_image {image}",
             f"verify_image {image}",
             f"targets {cfg['core']}",
-            # Mask interrupts before resuming: the flashed firmware's NVIC and
-            # SysTick are still configured, so a pending RTOS tick could enter
-            # its handlers and context-switch away from the RAM echo program.
-            "reg primask 1",
+            # Mask interrupts before resuming: the flashed firmware's vector
+            # table and tick source are still configured, so a pending RTOS
+            # tick could enter its handlers and context-switch away from the
+            # RAM echo program.
+            cfg["mask_interrupts"],
             "resume 0x20010000",
             "shutdown",
         ],
@@ -322,7 +354,8 @@ def exchange_full_duplex(port: UartPort, payload: bytes) -> bytes:
     return received
 
 
-def exercise_probe(source_serial: str, target_serial: str, target: str) -> None:
+def exercise_probe(source_serial: str, target_serial: str | None,
+                   target: str) -> None:
     failures = []
     try:
         for baud, stop, parity, bits in (
@@ -351,8 +384,10 @@ def exercise_probe(source_serial: str, target_serial: str, target: str) -> None:
         reset_target(source_serial, target)
 
     # The reset target must enumerate again before it becomes the probe for
-    # the opposite direction.
-    wait_for_uart(target_serial)
+    # the opposite direction. A plain target is not a probe and never
+    # enumerates, so there is nothing to wait for.
+    if target_serial is not None:
+        wait_for_uart(target_serial)
     if failures:
         raise AssertionError(
             f"UART bridge {source_serial} -> {target} echo failures:\n"
@@ -363,12 +398,22 @@ def exercise_probe(source_serial: str, target_serial: str, target: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--serial-a", required=True)
-    parser.add_argument("--serial-b", required=True)
+    parser.add_argument(
+        "--serial-b",
+        help="second probe's serial; omit when B is a plain target, which "
+             "tests the A-to-B direction only",
+    )
     parser.add_argument("--target-a", choices=TARGETS, default="rp2040")
     parser.add_argument("--target-b", choices=TARGETS, default="rp2350")
     args = parser.parse_args()
 
     exercise_probe(args.serial_a, args.serial_b, args.target_b)
+    if args.serial_b is None:
+        print(
+            f"UART1-to-target-UART0 tests passed for {args.serial_a} "
+            f"against {args.target_b}"
+        )
+        return
     exercise_probe(args.serial_b, args.serial_a, args.target_a)
     print("Bidirectional UART1-to-target-UART0 tests passed")
 

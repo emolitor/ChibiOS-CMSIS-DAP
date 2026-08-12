@@ -37,6 +37,24 @@ static const rp_pio_sm_t *swd_sm;
 /* Program offset in instruction memory (set by pioProgramLoad). */
 static int32_t prog_offset;
 
+/* The barrier uses a shared PIO flag routed to this core's PIO vector. */
+#define PIO_SWD_BARRIER_IRQ        0U
+#define PIO_SWD_BARRIER_MASK       (1U << PIO_SWD_BARRIER_IRQ)
+#define PIO_SWD_BARRIER_INTE       PIO_IRQ_SM(PIO_SWD_BARRIER_IRQ)
+#define PIO_SWD_BARRIER_TIMEOUT_US 2000000U
+
+/*
+ * Logical priority of the PIO vector, ChibiOS convention: zero is the most
+ * urgent and the handler must stay at or below the kernel priority because
+ * it wakes a thread through an I-class service. Three is the least urgent
+ * level available on every supported port and matches what mcuconf.h gives
+ * the other peripherals.
+ */
+#define PIO_SWD_IRQ_PRIORITY       3U
+
+/* Thread waiting on the barrier flag, resumed from the PIO handler. */
+static thread_reference_t barrier_trp;
+
 /*===========================================================================*/
 /* Pad configuration registers (CMSIS struct access).                        */
 /*===========================================================================*/
@@ -91,6 +109,72 @@ static inline void probe_hiz_clocks(uint32_t bit_count) {
   pioSmPut(swd_sm, 0U);  /* Dummy data (write_cmd does pull). */
 }
 
+/**
+ * @brief   PIO block handler: acknowledges the barrier flag and wakes the
+ *          waiting thread.
+ * @note    The LLD acknowledges nothing itself. IRQn_INTS is a live view of
+ *          INTR, so the flag has to be cleared here or the handler would be
+ *          re-entered forever.
+ */
+static void probe_barrier_isr(void *param, uint32_t ints) {
+  (void)param;
+
+  if ((ints & PIO_SWD_BARRIER_INTE) == 0U)
+    return;
+
+  pioIrqClearX(RP_PIO0_BLOCK, PIO_SWD_BARRIER_MASK);
+
+  chSysLockFromISR();
+  chThdResumeI(&barrier_trp, MSG_OK);
+  chSysUnlockFromISR();
+}
+
+/**
+ * @brief   Wait until all previously queued PIO commands have completed.
+ * @details A dedicated command sets a shared PIO IRQ flag after every word
+ *          ahead of it in the TX FIFO has been consumed and executed. The
+ *          flag is routed to this core's PIO vector, so the wait suspends
+ *          the calling thread instead of spinning on the flag.
+ */
+static bool probe_barrier(void) {
+  sysinterval_t timeout = TIME_US2I(PIO_SWD_BARRIER_TIMEOUT_US);
+  systime_t start = chVTGetSystemTimeX();
+  systime_t end = chTimeAddX(start, timeout);
+  msg_t msg;
+
+  /*
+   * Make room for the barrier command without blocking on the FIFO: a
+   * wedged program would never drain it and pioSmPut() cannot time out.
+   * Normally the FIFO has space and this does not loop at all.
+   */
+  while (pioSmIsTxFullX(swd_sm)) {
+    if (!chVTIsSystemTimeWithinX(start, end))
+      return false;
+  }
+
+  /*
+   * Arming and suspending share one critical section. The handler runs at
+   * or below the kernel priority, so it cannot slip in between the two and
+   * resume a reference that is not armed yet.
+   */
+  chSysLock();
+  pioIrqClearX(swd_sm->block, PIO_SWD_BARRIER_MASK);
+  /* The input direction keeps SWDIO high impedance between transactions. */
+  pioSmPutX(swd_sm,
+            pio_swd_cmd(1U, false, PIO_SWD_OFFSET_BARRIER_CMD,
+                        (uint32_t)prog_offset));
+  msg = chThdSuspendTimeoutS(&barrier_trp, timeout);
+  chSysUnlock();
+
+  if (msg != MSG_OK) {
+    /* Timed out: drop a flag raised after the wait was abandoned. */
+    pioIrqClearX(swd_sm->block, PIO_SWD_BARRIER_MASK);
+    return false;
+  }
+
+  return true;
+}
+
 /*===========================================================================*/
 /* Public API.                                                               */
 /*===========================================================================*/
@@ -99,9 +183,13 @@ static inline void probe_hiz_clocks(uint32_t bit_count) {
  * @brief   Initialize SWD pins and PIO state machine.
  */
 bool swd_init(uint32_t clk_div) {
-  /* Allocate PIO0 SM0 via PIO LLD (no ISR — polling only). */
+  /*
+   * Allocate PIO0 SM0 via PIO LLD. No per state machine ISR is needed, the
+   * barrier flag is a block resource and is served by a block callback;
+   * allocating here is also what enables this core's PIO vector.
+   */
   if (swd_sm == NULL) {
-    swd_sm = pioSmAlloc(RP_PIO0_BLOCK, 0U, 0U, NULL, NULL);
+    swd_sm = pioSmAlloc(RP_PIO0_BLOCK, 0U, PIO_SWD_IRQ_PRIORITY, NULL, NULL);
     if (swd_sm == NULL)
       return false;
 
@@ -111,6 +199,19 @@ bool swd_init(uint32_t clk_div) {
       swd_sm = NULL;
       return false;
     }
+
+    pioIrqClearX(swd_sm->block, PIO_SWD_BARRIER_MASK);
+
+    /*
+     * Route the barrier flag to this core. The block is active now that a
+     * state machine is allocated; an idle block is held in reset and would
+     * swallow the INTE write.
+     */
+    pioSetBlockCallback(RP_PIO0_BLOCK, probe_barrier_isr, NULL);
+    pioEnableInterruptX(RP_PIO0_BLOCK, PIO_SWD_BARRIER_INTE);
+  }
+  else if (!probe_barrier()) {
+    return false;
   }
 
   /* nRESET: open-drain (SIO, not PIO), pull-up, deasserted. */
@@ -129,15 +230,43 @@ bool swd_init(uint32_t clk_div) {
 /**
  * @brief   Update PIO clock divider.
  */
-void swd_set_clkdiv(uint32_t clk_div) {
+bool swd_set_clkdiv(uint32_t clk_div) {
+  if (swd_sm == NULL)
+    return false;
+
+  /*
+   * Hosts re-send DAP_SWJ_Clock on every connect and often between transfer
+   * blocks, usually with the value already in force. An unchanged divider
+   * needs neither the barrier round trip nor the register write.
+   */
+  if (pioSmGetClkdivX(swd_sm) == pio_swd_clkdiv_reg(clk_div))
+    return true;
+
+  if (!probe_barrier())
+    return false;
+
   pio_swd_set_clkdiv(swd_sm, clk_div);
+  return true;
 }
 
 /**
  * @brief   Tri-state all SWD pins, disable PIO.
  */
-void swd_off(void) {
+bool swd_off(void) {
+  bool barrier_ok = true;
+
   if (swd_sm != NULL) {
+    barrier_ok = probe_barrier();
+
+    /*
+     * Silence the source before the block is released. Freeing the last SM
+     * and unloading the last program resets the block, which drops both the
+     * INTE routing and the callback registration; doing it explicitly first
+     * keeps the handler from running against a freed state machine.
+     */
+    pioDisableInterruptX(RP_PIO0_BLOCK, PIO_SWD_BARRIER_INTE);
+    pioSetBlockCallback(RP_PIO0_BLOCK, NULL, NULL);
+
     /*
      * Stop and release the SM before erasing its live instruction memory.
      * Current ChibiOS deliberately keeps a PIO block out of reset while
@@ -155,6 +284,8 @@ void swd_off(void) {
   IO_CTRL(SWD_PIN_SWCLK)  = RP_PIO_FUNCSEL_NULL;
   IO_CTRL(SWD_PIN_SWDIO)  = RP_PIO_FUNCSEL_NULL;
   IO_CTRL(SWD_PIN_NRESET) = RP_PIO_FUNCSEL_NULL;
+
+  return barrier_ok;
 }
 
 /**

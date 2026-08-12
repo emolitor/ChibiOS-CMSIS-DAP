@@ -20,6 +20,7 @@
 #define probe_swd_offset_turnaround_cmd 0u
 #define probe_swd_offset_get_next_cmd 3u
 #define probe_swd_offset_read_cmd 8u
+#define probe_swd_offset_barrier_cmd 11u
 
 static const uint16_t probe_swd_program_instructions[] = {
     0x80a0, //  0: pull   block
@@ -35,12 +36,14 @@ static const uint16_t probe_swd_program_instructions[] = {
     0x1047, //  9: jmp    x--, 7          side 0
     0x8020, // 10: push   block
             //     .wrap
+    0xc000, // 11: irq    nowait 0
+    0x0003, // 12: jmp    3
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program probe_swd_program = {
     .instructions = probe_swd_program_instructions,
-    .length = 11,
+    .length = 13,
     .origin = -1,
     .pio_version = probe_swd_pio_version,
 #if PICO_PIO_VERSION > 0

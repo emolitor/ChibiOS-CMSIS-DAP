@@ -9,7 +9,7 @@ A CMSIS-DAP v2 debug probe for the RP2040 (Raspberry Pi Pico) and RP2350 (Raspbe
 - **Dual-core SMP model**:
   Core 0 runs the main thread, `DapThread`, and `UartThread`; Core 1 runs `DapProcessThread`
 - **PIO-based SWD** Derived from the [Raspberry Pi Debug Probe](https://github.com/raspberrypi/debugprobe)
-- **Current ChibiOS GitHub master targets**: RP2040 (Cortex-M0+),
+- **Validated ChibiOS GitHub master targets**: RP2040 (Cortex-M0+),
   RP2350 (Cortex-M33), and RP2350 (Hazard3 RISC-V)
 - **LED status indicator**: off (idle), solid (DAP connected), slow blink (DAP running)
 
@@ -66,6 +66,7 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 - `arm-none-eabi-gcc` toolchain
 - `riscv-none-elf-gcc` toolchain (for RP2350 Hazard3)
 - `picotool` (for UF2 conversion and flashing)
+- `pioasm` 2.2.0 (only when modifying `probe_swd.pio`)
 - `git` (to check out ChibiOS)
 - Python 3, a native C compiler, and `pytest` (for host tests)
 - PyUSB and OpenOCD (for the hardware functional tests)
@@ -73,27 +74,25 @@ Includes a BOS descriptor with Platform Capability for automatic WinUSB driver b
 ### Build
 
 ```bash
-make chibios                  # clone/update chibios-upstream/chibios master
+make chibios                  # clone/update the pinned ChibiOS revision
 make                          # build all targets
 make TARGET=rp2040            # build RP2040 only
 make TARGET=rp2350            # build RP2350 ARM only
 make TARGET=rp2350_riscv      # build RP2350 Hazard3 only
 ```
 
-`make chibios` tracks GitHub master and refuses to update a dirty or
-unexpected checkout. It also applies the compatibility patches in `patches/`;
-the current patch makes RP2040/RP2350 core-1 reset follow the boot-ROM FIFO
-protocol used by the latest Pico SDK. Each successful update prints the exact
-ChibiOS commit; `make chibios-sha` prints it again for test reports. Firmware
-builds fail early if the required compatibility is absent.
+`make chibios` checks out the audited GitHub master commit configured by
+`CHIBIOS_REV` and refuses to update a dirty or unexpected checkout. No local
+ChibiOS patches are required. Each successful update prints the exact ChibiOS
+commit; `make chibios-sha` prints it again for test reports. Firmware builds
+fail early if the checkout is dirty or is not at the configured revision.
 
-To use an existing checkout, set `CHIBIOS=/path/to/chibios`. The repository
-URL and branch can be overridden with `CHIBIOS_GIT=` and `CHIBIOS_BRANCH=`.
-For a reproducible build, pin an upstream revision with `CHIBIOS_REV=`;
-`make chibios CHIBIOS_REV=<rev>` checks that revision out instead of tracking
-the branch head. Prefer a full immutable commit SHA — tags can be
-force-moved, so they are only a convenience; if you pin a tag, record the
-commit that `make chibios-sha` reports.
+To use an existing checkout, set `CHIBIOS=/path/to/chibios`. Override the pin
+with `CHIBIOS_REV=<rev>`, or pass `CHIBIOS_REV=` explicitly to test the current
+`CHIBIOS_BRANCH` head. The repository URL and branch can be overridden with
+`CHIBIOS_GIT=` and `CHIBIOS_BRANCH=`. Prefer a full immutable commit SHA — tags
+can be force-moved, so they are only a convenience; if you use a tag, record
+the commit that `make chibios-sha` reports.
 
 ### Tests
 
@@ -119,11 +118,21 @@ The functional tests require PyUSB, OpenOCD, and physical wiring appropriate
 to the requested path. Always select devices by serial number when multiple
 probes share VID:PID `2e8a:000c`.
 
+`--target` selects the chip and architecture under debug: `rp2040`, `rp2350`
+for an Arm image, or `rp2350_riscv` for a Hazard3 one. Both RP2350 values
+share OpenOCD's `target/rp2350.cfg`, which defaults to the Cortex-M pair, so
+the RISC-V value additionally selects the `rv0` core. Pointing the Arm value
+at a RISC-V image leaves both Cortex-M cores reporting `become unavailable`
+and OpenOCD failing with `Target not examined yet`, which resembles a probe
+fault but is a target-selection mismatch.
+
 The UART test matches the Raspberry Pi Debug Probe topology: each probe's
 UART1 on GPIO4/5 is wired to the opposite target's UART0 on GPIO1/0. It loads
 a temporary UART0 echo program into target RAM through SWD, tests both probes
 at 115200 8N1, 230400 7E2, and 1 Mbaud 8N1, then watchdog-reboots each target
-back into the firmware in flash.
+back into the firmware in flash. Omit `--serial-b` when the far end is a
+plain target rather than a second probe; that tests the A-to-B direction only
+and skips the re-enumeration wait, which has nothing to wait for.
 
 ### Flash
 
@@ -136,20 +145,28 @@ Or flash via SWD with OpenOCD / another debug probe.
 #### Booting over SWD (dual-core)
 
 The firmware is dual-core (Core 0 runs the USB/DAP/UART threads, Core 1 runs
-`DapProcessThread`), so it only reaches the USB host after Core 1 has launched.
-A plain `reset run` does **not** reliably start Core 1 — Core 0 ends up in the
-idle thread while Core 1 stays parked in the boot ROM, and USB never
-enumerates. Boot it one of two ways:
+`DapProcessThread`). Let ChibiOS own the secondary-core reset and boot-ROM FIFO
+launch by configuring OpenOCD for core 0 only, before loading the target file:
 
-- **Full boot-ROM cold reboot** (recommended for this firmware): trigger a
-  watchdog reset so the boot ROM re-launches both cores from flash. The exact
-  register sequence per chip is in `tests/functional/uart_link_test.py`
-  (`reset_target()` / the `TARGETS` table) — note the RP2040 and RP2350 use
-  different `psm`/`wdsel`/`watchdog` values. A transient "Failed to write
-  memory" as the chip resets mid-write is expected.
-- **Ordered resume** (works for plain demos): `reset halt`, resume Core 1 so it
-  reaches the boot-ROM wait-for-vector loop, then resume Core 0 so its FIFO
-  handshake launches Core 1.
+```text
+# RP2040
+-c "set USE_CORE 0"  -f target/rp2040.cfg
+
+# RP2350 Arm
+-c "set USE_CORE cm0" -f target/rp2350.cfg
+```
+
+With that setting, `program <elf> verify reset exit` and repeated `reset run`
+both work. OpenOCD's default dual-core target configuration also manages core
+1 during reset and can conflict with ChibiOS's force-reset/launch sequence; the
+result may enumerate on USB but stop answering CMSIS-DAP requests. The legacy
+FIFO-notification compatibility patch does not correct that debugger-induced
+state.
+
+A full boot-ROM cold reboot is also valid. The watchdog register sequence for
+each chip is in `tests/functional/uart_link_test.py` (`reset_target()` and the
+`TARGETS` table). A transient "Failed to write memory" as the chip resets
+mid-write is expected.
 
 For the **RP2350 in RISC-V mode**, flash with the `rp2350-auto` OpenOCD target:
 `rescue`, then `program build/rp2350_riscv/ch.elf verify`, then `reset run`. The

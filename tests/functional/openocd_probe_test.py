@@ -12,8 +12,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 ARTIFACTS = ROOT / "tests" / "artifacts"
 OPENOCD_SCRIPTS = pathlib.Path("/usr/local/share/openocd/scripts")
 
+# OpenOCD invocation per firmware target. Both RP2350 builds share
+# target/rp2350.cfg, which defaults to the Cortex-M pair. On a RISC-V image
+# the ROM table presence bits those cores are probed with read zero, so they
+# report "become unavailable" and examination never runs; selecting the
+# Hazard3 core up front avoids a target-side mismatch that otherwise looks
+# like a probe failure.
+TARGETS = {
+    "rp2040": {"cfg": "target/rp2040.cfg", "use_core": None},
+    "rp2350": {"cfg": "target/rp2350.cfg", "use_core": None},
+    "rp2350_riscv": {"cfg": "target/rp2350.cfg", "use_core": "rv0"},
+}
 
-def restore_target(serial: str, target: str, baseline: pathlib.Path) -> None:
+
+def openocd_prefix(serial: str, target: str, speed: int) -> list[str]:
+    """Adapter and target selection shared by every invocation.
+
+    USE_CORE must be set before the target config is sourced, as the config
+    reads it while creating the target objects.
+    """
+    cfg = TARGETS[target]
     command = [
         "openocd",
         "-s",
@@ -23,9 +41,16 @@ def restore_target(serial: str, target: str, baseline: pathlib.Path) -> None:
         "-c",
         f"adapter serial {serial}",
         "-c",
-        "adapter speed 1000",
-        "-f",
-        f"target/{target}.cfg",
+        f"adapter speed {speed}",
+    ]
+    if cfg["use_core"] is not None:
+        command.extend(("-c", f"set USE_CORE {cfg['use_core']}"))
+    command.extend(("-f", cfg["cfg"]))
+    return command
+
+
+def restore_target(serial: str, target: str, baseline: pathlib.Path) -> None:
+    command = openocd_prefix(serial, target, 1000) + [
         "-c",
         "init",
         "-c",
@@ -49,7 +74,6 @@ def restore_target(serial: str, target: str, baseline: pathlib.Path) -> None:
 
 
 def run_openocd(serial: str, target: str, speed: int, iteration: int) -> None:
-    target_cfg = f"target/{target}.cfg"
     stem = f"{serial}-{target}-{speed}-{iteration}"
     baseline_dump = ARTIFACTS / f"{stem}-baseline.bin"
     modified_dump = ARTIFACTS / f"{stem}-modified.bin"
@@ -57,18 +81,7 @@ def run_openocd(serial: str, target: str, speed: int, iteration: int) -> None:
     baseline_dump.unlink(missing_ok=True)
     modified_dump.unlink(missing_ok=True)
 
-    command = [
-        "openocd",
-        "-s",
-        str(OPENOCD_SCRIPTS),
-        "-f",
-        "interface/cmsis-dap.cfg",
-        "-c",
-        f"adapter serial {serial}",
-        "-c",
-        f"adapter speed {speed}",
-        "-f",
-        target_cfg,
+    command = openocd_prefix(serial, target, speed) + [
         "-c",
         "init",
         "-c",
@@ -107,7 +120,7 @@ def run_openocd(serial: str, target: str, speed: int, iteration: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--serial", required=True)
-    parser.add_argument("--target", choices=("rp2040", "rp2350"), required=True)
+    parser.add_argument("--target", choices=tuple(TARGETS), required=True)
     args = parser.parse_args()
 
     ARTIFACTS.mkdir(parents=True, exist_ok=True)

@@ -57,13 +57,11 @@ endif
 CHIBIOS        ?= ./ChibiOS
 CHIBIOS_GIT    ?= https://github.com/chibios-upstream/chibios.git
 CHIBIOS_BRANCH ?= master
-# Optional: pin a specific upstream commit or tag for reproducible builds.
-# When empty, 'make chibios' tracks the branch head.
-CHIBIOS_REV    ?=
+# Audited upstream revision used by default for reproducible builds.
+# Override with another commit/tag, or pass CHIBIOS_REV= explicitly to track
+# the current CHIBIOS_BRANCH head.
+CHIBIOS_REV    ?= 6325c1b070f32e9fd0ae218ce9bdfa3c0513ca34
 PICOTOOL       ?= picotool
-
-CHIBIOS_PATCHES := $(abspath \
-  patches/0001-rp-consume-core1-reset-notification.patch)
 
 CHIBIOS_RP2350_RISCV_STARTUP := $(CHIBIOS)/os/common/startup/RISCV-HAZARD3/compilers/GCC/mk/startup_rp2350_riscv.mk
 CHIBIOS_RP2350_RISCV_PLATFORM := $(CHIBIOS)/os/hal/ports/RP/RP2350/platform_riscv.mk
@@ -260,9 +258,8 @@ pioasm: probe_swd.pio
 
 .PHONY: chibios
 
-# Checkout/update ChibiOS from GitHub master and apply the compatibility
-# patches required by this project. Existing changes other than those exact
-# patches are rejected so dependency updates cannot discard local work.
+# Checkout/update ChibiOS from GitHub master. Existing changes are rejected so
+# dependency updates cannot discard local work.
 # Set CHIBIOS_REV=<commit-or-tag> to pin a specific upstream revision instead
 # of tracking the branch head.
 chibios:
@@ -278,70 +275,33 @@ endif
 else
 	@test "$$(git -C $(CHIBIOS) remote get-url origin)" = "$(CHIBIOS_GIT)" || \
 	  { echo "Error: $(CHIBIOS) origin is not $(CHIBIOS_GIT)"; exit 1; }
+	@test -z "$$(git -C $(CHIBIOS) status --porcelain)" || \
+	  { echo "Error: $(CHIBIOS) has local changes"; exit 1; }
 	@set -e; \
-	reverted=""; \
-	if test -n "$$(git -C $(CHIBIOS) status --porcelain)"; then \
-	  for patch in $(CHIBIOS_PATCHES); do \
-	    git -C $(CHIBIOS) apply --reverse --check "$$patch" || \
-	      { echo "Error: $(CHIBIOS) has changes other than the expected patches"; exit 1; }; \
-	  done; \
-	  for patch in $(CHIBIOS_PATCHES); do \
-	    git -C $(CHIBIOS) apply --reverse "$$patch"; \
-	  done; \
-	  if test -n "$$(git -C $(CHIBIOS) status --porcelain)"; then \
-	    for patch in $(CHIBIOS_PATCHES); do \
-	      git -C $(CHIBIOS) apply "$$patch" || true; \
-	    done; \
-	    echo "Error: $(CHIBIOS) has changes other than the expected patches"; \
-	    exit 1; \
-	  fi; \
-	  reverted="yes"; \
-	fi; \
 	if test -n "$(strip $(CHIBIOS_REV))"; then \
-	  update() { git -C $(CHIBIOS) fetch origin "$(CHIBIOS_REV)" && \
-	             git -C $(CHIBIOS) checkout --detach FETCH_HEAD; }; \
+	  git -C $(CHIBIOS) fetch origin "$(CHIBIOS_REV)" && \
+	  git -C $(CHIBIOS) checkout --detach FETCH_HEAD; \
 	else \
-	  update() { git -C $(CHIBIOS) fetch origin $(CHIBIOS_BRANCH) && \
-	             git -C $(CHIBIOS) merge --ff-only origin/$(CHIBIOS_BRANCH); }; \
-	fi; \
-	if update; then \
-	  :; \
-	else \
-	  status=$$?; \
-	  if test -n "$$reverted"; then \
-	    echo "Update failed; restoring compatibility patch(es)"; \
-	    for patch in $(CHIBIOS_PATCHES); do \
-	      git -C $(CHIBIOS) apply "$$patch" || \
-	        echo "Warning: could not restore $$(basename "$$patch"); $(CHIBIOS) may be left unpatched — rerun 'make chibios'"; \
-	    done; \
-	  fi; \
-	  exit $$status; \
+	  git -C $(CHIBIOS) fetch origin $(CHIBIOS_BRANCH) && \
+	  git -C $(CHIBIOS) merge --ff-only origin/$(CHIBIOS_BRANCH); \
 	fi
 endif
-	@set -e; \
-	for patch in $(CHIBIOS_PATCHES); do \
-	  if git -C $(CHIBIOS) apply --reverse --check "$$patch" >/dev/null 2>&1; then \
-	    echo "ChibiOS compatibility already present: $$(basename "$$patch")"; \
-	  elif git -C $(CHIBIOS) apply --check "$$patch"; then \
-	    git -C $(CHIBIOS) apply "$$patch"; \
-	    echo "Applied ChibiOS compatibility patch: $$(basename "$$patch")"; \
-	  else \
-	    echo "Error: ChibiOS master is incompatible with $$patch"; \
-	    exit 1; \
-	  fi; \
-	done
 	@echo "ChibiOS $$(git -C $(CHIBIOS) rev-parse HEAD)"
 
 .PHONY: chibios-check chibios-sha
 chibios-check:
 	@prefix="$$(git -C $(CHIBIOS) rev-parse --show-prefix 2>/dev/null)" && test -z "$$prefix" || \
 	  { echo "Error: $(CHIBIOS) is not a ChibiOS checkout root. Run 'make chibios' first"; exit 1; }
+	@test -z "$$(git -C $(CHIBIOS) status --porcelain)" || \
+	  { echo "Error: $(CHIBIOS) has local changes; restore the unmodified dependency before building"; exit 1; }
 	@set -e; \
-	for patch in $(CHIBIOS_PATCHES); do \
-	  git -C $(CHIBIOS) apply --reverse --check "$$patch" >/dev/null 2>&1 || \
-	    { echo "Error: missing ChibiOS compatibility patch $$(basename "$$patch"); run 'make chibios'"; exit 1; }; \
-	done
-
+	if test -n "$(strip $(CHIBIOS_REV))"; then \
+	  expected="$$(git -C $(CHIBIOS) rev-parse --verify '$(strip $(CHIBIOS_REV))^{commit}' 2>/dev/null)" || \
+	    { echo "Error: ChibiOS revision $(strip $(CHIBIOS_REV)) is not present; run 'make chibios'"; exit 1; }; \
+	  actual="$$(git -C $(CHIBIOS) rev-parse HEAD)"; \
+	  test "$$actual" = "$$expected" || \
+	    { echo "Error: ChibiOS HEAD $$actual does not match required revision $$expected; run 'make chibios' or override CHIBIOS_REV="; exit 1; }; \
+	fi
 chibios-sha:
 	@prefix="$$(git -C $(CHIBIOS) rev-parse --show-prefix 2>/dev/null)" && test -z "$$prefix" || \
 	  { echo "Error: $(CHIBIOS) is not a ChibiOS checkout root. Run 'make chibios' first"; exit 1; }
